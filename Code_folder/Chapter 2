@@ -1,40 +1,28 @@
 
 # Load libraries
-
 library(dplyr)
 library(tidymodels)
 library(doParallel)
 library(glmnet)
 
-
 # Grouped data splitting in training and testing
 # It uses the field location as grouping factor
-
 set.seed(123)
-
 initial_split<-group_initial_split(my_db, group = field,  prop=4/5)
-
 # Creating training and testing datasets
 training_set<-training(initial_split)
 testing_set<-testing(initial_split)
-
 # Check if field locations in the training set overlap with field locations in the testing set
 intersect(training_set %>% select(field) %>% pull(),
           testing_set %>% select(field) %>% pull())
-
-
-
-## Create bootstrap indices blocking by field location
-
+# Create bootstrap indices blocking by field location
 # set the number of bootstrap
 n_boots<-100
-boot<-group_bootstraps(training_set, group =field, times=n_boots)
-# Start modelling
+boot<-group_bootstraps(training_set, group=field, times=n_boots)
 
-## Create a recipe
-
+# Create a recipe
 lasso_rec<- 
-  # exclude grouping variable "farm" 
+  # exclude grouping variable "field" 
   recipe(outcome ~ ., data =training_set %>% select(-field)) %>% 
   # update role for "crop_id"
   update_role(crop_id, new_role = "cropId") %>%
@@ -42,34 +30,25 @@ lasso_rec<-
   step_dummy(all_nominal(), - crop_id, -all_outcomes()) %>%
   # standardize variables (here is called normalize)
   step_normalize(all_predictors(), -crop_id, - all_outcomes())  %>%
-  
   # omit NAs
   step_naomit(all_predictors())
-
 # prepare recipe
 lasso_prep <- prep(lasso_rec)
 
-
-
-
 # Tune Lasso
-
 # Set model specification (penalty = lambda, mixture = alpha). 
 # LASSO logistic regression has mixture = 1
-
 lasso_spec<-(logistic_reg(
   penalty = tune(),
   mixture = 1) %>% 
     set_mode("classification") %>%
     set_engine("glmnet"))
-
 # Set workflow
 lasso_wf<-workflow() %>%
   # Add recipe
   add_recipe(lasso_rec) %>%
   # Add model specification
   add_model(lasso_spec)
-
 # Get HPs info
 hp_arg_lasso<-tune_args(lasso_wf, verbose =T)
 # Set seed to generate reproducible grid of hyperparameters (HP)
@@ -78,17 +57,9 @@ set.seed(123)
 hp_grid_lasso<-dials::parameters(lasso_wf) %>%
   update(penalty=penalty(range=c(-5,0)))%>%
   grid_latin_hypercube(size=100)
-
-
-
 # Start Parallel
-
-
 cl<-makePSOCKcluster(4)
 registerDoParallel(cl)
-
-
-
 # Set seed for reproducibility 
 set.seed(123)
 # Tuning results
@@ -120,56 +91,33 @@ gs_lasso_res <- tune_grid(
     event_level = "second",
     # extract model results for each iteration
     extract = function (x) extract_model(x)))
-
-
 # stop Parallel
 stopCluster(cl)
 
-
-
-### Save tuning results
+#Tuning results
 # Collect metrics
-
 gs_lasso_res %>%
   collect_metrics()
-
-
-
 # Show first 10 best scores for each metric
-
 gs_lasso_res %>%
   show_best("accuracy")
-
 gs_lasso_res %>%
   show_best("roc_auc")
-
 gs_lasso_res %>%
   show_best("pr_auc")
-
 gs_lasso_res %>%
   show_best("sens")
-
 gs_lasso_res %>%
   show_best("spec")
-
 gs_lasso_res %>%
   show_best("precision")
-
 gs_lasso_res %>%
   show_best("npv")
-
-
-
 # MaxPerf model (highest AUROC)
 select_best(gs_lasso_res, "roc_auc")
 
-
-
-
-
 # Stability function. Code from Nuogueira et al., 2017
 # https://github.com/nogueirs/JMLR2018
-
 
 getStability <- function(X,alpha=0.05) {
   ## the input X is a binary matrix of size M*d where:
@@ -205,10 +153,7 @@ getStability <- function(X,alpha=0.05) {
 }
 
 
-## Create matrix
-
-
-
+# Create matrix
 # set the number of variables
 num_variables = dim(juice(lasso_prep))[2]
 
@@ -227,8 +172,6 @@ lasso_fs.matrix.ls <- list()
 
 # create a list to store coefficients
 c<-list()
-
-
 for(j in 1:lambda) {
   for(i in 1:n_boots){
     # extract coefficients
@@ -254,15 +197,11 @@ for(j in 1:lambda) {
   lasso_fs.matrix.ls[[j]]<-setNames(data.frame(t(coeff[,-1])), coeff[,1]) %>% 
     rownames_to_column() %>%  
     select(-rowname)
-  
-  
-}
+ }
 
 
 
 ## Compute stability 
-
-
 lasso_results<-as.data.frame(array(0,dim=c(lambda,4)))
 
 for (j in 1:lambda){
@@ -280,16 +219,10 @@ stability<-lasso_results %>%
   
   bind_cols(lambda = gs_lasso_res$.metrics[[1]]$penalty[c(1:lambda)]) %>%
   mutate( n = n_boots)
-
 stability
 
 
 # Average n of feature selected for each lambda
-
-
-
-
-
 av_features<-vector()
 # average number of predictors by lambda
 for (j in 1:lambda){ av_features[j]<-
@@ -306,8 +239,6 @@ av_features<-av_features %>%
               sprintf('%0.3d', 1:dim(hp_grid_lasso)[1]), sep=""))
 
 
-
-
 stability_vs_performance<-stability %>%
   select(lambda, stability, lower_bound, upper_bound) %>%
   left_join(gs_lasso_res %>% 
@@ -315,8 +246,7 @@ stability_vs_performance<-stability %>%
               filter(.metric =="roc_auc") %>%
               mutate(ROC_AUC = mean,
                      lambda=penalty,.keep="unused") %>%
-              
-              select(ROC_AUC,lambda), 
+            select(ROC_AUC,lambda), 
             by =c("lambda")) %>%
   mutate( model = paste("Preprocessor1_Model", 
                         sprintf('%0.3d', 1:dim(hp_grid_lasso)[1]), 
@@ -326,8 +256,6 @@ stability_vs_performance<-stability %>%
 
 # Identify optimal model OPT
 # OPT is obtained identifying a trade-off between stability and predictive performance
-
-
 acc.const<-0.01
 stab.const<-0
 
@@ -344,16 +272,11 @@ opt<-stability_vs_performance %>%
 
 
 # Define maxSTAB
-
 max_stab<-stability_vs_performance%>% 
   filter(stability == max(stability)) %>% slice(1)
-
-#Define maxPERF
-
+# Define maxPERF
 max_perf<-stability_vs_performance%>% 
   filter(ROC_AUC == max(ROC_AUC)) %>% slice(1)
-
-
 opt
 max_stab
 max_perf
@@ -371,8 +294,6 @@ final_models<-
 
 final_models
 
-
-
 # finalize workflow
 final_lasso<-list()
 for(i in 1:3){
@@ -381,17 +302,12 @@ for(i in 1:3){
     finalize_workflow(final_models[i,])}
 
 # start Parallell
-
 library(doParallel)
 cl<-makePSOCKcluster(4)
 registerDoParallel(cl)
-
-
 # set seed for reproducibility
 set.seed(123)
-
 # Fit all the training data
-
 final_fit<-list()
 for(i in 1:3){final_fit[[i]] <- final_lasso[[i]] %>%
   fit(training_set %>% select(-field))}
