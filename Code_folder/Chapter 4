@@ -1,0 +1,489 @@
+---
+title: "CB RFE"
+author: "Francesco Civita"
+date: "13/11/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Load libraries
+
+```{r, message = F}
+
+
+library(dplyr)
+library(skimr)
+library(tidyr)
+library(lubridate)
+library(janitor)
+library(tidymodels)
+library(tune)
+library(tidyverse)
+library(tictoc)
+
+```
+# Clean r's brain
+
+```{r, message = FALSE}
+
+rm(list=ls())
+
+```
+
+# Import data
+
+```{r}
+
+all<-readRDS("C:/Users/Avogadro/PhD Blackleg/ML/NCV/DSS/all.rds")
+
+```
+
+```{r}
+
+
+library(mlr3verse)
+library(mlr3spatiotempcv)
+library(future)
+library(future.apply)
+
+
+
+set.seed(123, kind = "L'Ecuyer-CMRG")
+
+
+task <- as_task_classif(all,target = "bleg",   positive = "Yes")
+# BLOCKING by "Field" 
+task$col_roles$group="year"
+# Remove "userID" from features
+
+task$col_roles$feature = setdiff(task$col_roles$feature, "year")
+
+
+resampling_inner = rsmp("cv",folds=3)
+learner = lrn("classif.rpart")
+measure = msr("classif.ce")
+search_space = ps(cp = p_dbl(lower = 0.001, upper = 0.1))
+terminator = trm("evals", n_evals = 5)
+tuner = tnr("grid_search", resolution = 5)
+at = AutoTuner$new(learner, resampling_inner, measure, terminator, tuner, search_space)
+resampling_outer = rsmp("cv",folds=5)
+
+plan(multisession, workers = 5)
+tic()
+
+
+rr = resample(task = task, learner = at, resampling = resampling_outer, store_models = T, store_backends = T)
+toc()
+```
+# Outer
+
+```{r}
+
+Outer_mlr<-list()
+
+
+for (i in 1:5) Outer_mlr$train.inds[[i]]<-rr$resampling$train_set(i)
+for (i in 1:5) Outer_mlr$test.inds[[i]]<-rr$resampling$test_set(i)
+```
+
+# Inner
+
+```{r}
+Inner_mlr<-list()
+train_inds<-list()
+test_inds<-list()
+
+for(i in 1:5){
+  for(j in 1:3){train_inds[[j]]<-rr$learners[[i]]$tuning_instance$objective$resampling$train_set(j)
+                test_inds[[j]]<-rr$learners[[i]]$tuning_instance$objective$resampling$test_set(j)
+                }
+ Inner_mlr[[i]]<-list(train.inds=train_inds, test.inds=test_inds)
+}
+```
+
+```{r}
+saveRDS(Inner_mlr, "Inner_mlr.rds")
+saveRDS(Outer_mlr, "Outer_mlr.rds")
+```
+
+#Manual CV
+```{r}
+
+indices <- list()
+ Out<-list()
+for(i in 1:5){
+  for(j in 1:3){Out[[j]]<-
+list(analysis = c(Inner_mlr[[i]]$train.inds[[j]]), assessment =c(Inner_mlr[[i]]$test.inds[[j]]))}
+  indices[[i]]<-Out}
+
+saveRDS(indices, "indices.rds")
+
+splits<-list()
+ for(j in 1:5){splits[[j]] <- lapply(indices[[j]], make_splits, data = all)}
+
+manual_cv<-list()
+ for(j in 1:5){manual_cv[[j]] <-manual_rset(splits[[j]], c(paste("Fold", sprintf('%0.1d', 1:3), sep="")))}
+
+#rm(splits)
+
+
+
+
+```
+
+```{r}
+saveRDS(Inner_mlr, "Inner_mlr.rds")
+saveRDS(Outer_mlr, "Outer_mlr.rds")
+```
+
+```{r}
+ens_rec<-list()
+
+for(j in 1:5){
+ens_rec[[j]]<- recipe(bleg ~ ., data = all[Outer_mlr$train.inds[[j]],] %>% select(-year)) %>%
+    update_role(crop_id, new_role = "Id") 
+ 
+   }
+
+   skim(juice(prep(ens_rec[[1]])))
+```
+
+
+
+```{r}
+library(catboost)
+library(treesnip)
+set_dependency("boost_tree", eng = "catboost", "catboost")
+set_dependency("boost_tree", eng = "catboost", "treesnip")
+
+catboost_spec<-(boost_tree(
+    mtry = tune(),
+    trees = 150,
+    tree_depth = tune(),
+    learn_rate = tune(),
+    stop_iter = 10)) %>% 
+      set_mode("classification") %>%
+      set_engine("catboost", nthread=4)
+
+catboost_wf<-list()
+for(j in 1:5){
+catboost_wf[[j]]<-workflow() %>%
+  add_recipe(ens_rec[[j]]) %>%
+  add_model(catboost_spec)}
+
+# get info on the hyperparameter to try
+set.seed(123)
+hp_arg_catboost<-tune_args(catboost_wf[[j]], verbose =T)
+hp_grid_catboost<-dials::parameters(catboost_wf[[1]]) %>%
+      update(learn_rate = learn_rate(range = c(-1,-2))) %>%
+      update(tree_depth = tree_depth(range = c(6,10))) %>%
+      update(mtry = mtry(range = c(3, 20)))%>%
+  grid_max_entropy(size=30) 
+  
+
+
+library(tictoc)
+library(doParallel)
+cl<-makePSOCKcluster(4)
+registerDoParallel(cl)
+tic()
+
+gs_catboost_res<-list()
+#try different seeds
+set.seed(123, kind = "L'Ecuyer-CMRG")
+#set.seed(2020) #it seems to be irrelevant with lasso. It might depend only on seeds from initial splitting
+for(j in 1:5){
+  gs_catboost_res[[j]] <- tune_grid(
+    catboost_wf[[j]], # Model workflow defined above
+    resamples = manual_cv[[j]],          # Resamples defined obove
+    grid = hp_grid_catboost,            # Number of candidate parameter sets to be created    automatically
+    metrics = metric_set(accuracy,
+                         pr_auc,
+                         roc_auc,
+                         sens,
+                         yardstick::spec,
+                         yardstick::precision,
+                         yardstick::f_meas,
+                         yardstick::mcc,
+                         yardstick::mn_log_loss
+    ),    # metric
+    control = control_grid(save_workflow = T, save_pred = TRUE, verbose = TRUE, event_level = "second",
+                           extract = function (x) extract_fit_engine(x)))}# control the tuning process
+
+
+
+toc()
+stopCluster(cl)
+
+#2176.87 sec elapsed
+```
+```{r}
+unregister <- function() {
+  env <- foreach:::.foreachGlobals
+  rm(list=ls(name=env), pos=env)
+}
+
+unregister()
+```
+
+### Collect metrics catboost
+
+```{r}
+
+
+metric_catboost<-list()
+for (j in 1:5) {metric_catboost[[j]]<- gs_catboost_res[[j]] %>%
+  collect_metrics()}
+
+```
+
+
+```{r}
+saveRDS(metric_catboost, "metric_catboost_cy.rds")
+```
+
+### Best AUROC catboost
+
+```{r}
+best_auc_gs_catboost<-list()
+for(j in 1:5){
+  best_auc_gs_catboost[[j]]<-select_best(gs_catboost_res[[j]], "roc_auc")}
+
+
+```
+
+
+### Collect metrics catboost Sf
+```{r}
+metric_catboost_all<-list()
+for (j in 1:5) {metric_catboost_all[[j]]<- gs_catboost_res[[j]] %>%
+  collect_metrics(summarize=F)}
+
+metric_catboost_Sf<-list()
+for (j in 1:5) {metric_catboost_Sf[[j]]<- metric_catboost_all[[j]]%>% 
+  filter(.config==best_auc_gs_catboost[[j]]$.config)%>%
+           mutate(model="catboost")}
+
+saveRDS(metric_catboost_all, "metric_catboost_all.rds")
+saveRDS(metric_catboost_Sf, "metric_catboost_Sf.rds")
+```
+
+### Collect predictions catboost
+```{r}
+predictions_all<-list()
+for(i in 1:5) {predictions_all[[i]]<-collect_predictions(gs_catboost_res[[i]], summarize=F)}
+
+predictions<-list()
+for(i in 1:5) {predictions[[i]]<-predictions_all[[i]]%>% filter(.config == best_auc_gs_catboost[[i]]$.config) %>%
+  select(id,.row, bleg, catboost_Yes=.pred_Yes, catboost_No = .pred_No, catboost_pred=.pred_class)}
+
+saveRDS(predictions, "predictions_catboost.rds")
+saveRDS(predictions_all, "predictions_all_catboost.rds")
+```
+
+#### Finalize catboost (best AUROC)
+```{r}
+
+final_catboost<-list()
+for(j in 1:5){
+  final_catboost[[j]]<-catboost_wf[[j]] %>% 
+    finalize_workflow(best_auc_gs_catboost[[j]])}
+```
+
+#### Last fit catboost (best AUROC)
+
+```{r}
+
+cl<-makePSOCKcluster(4)
+registerDoParallel(cl)
+tic()
+
+#try different seeds
+set.seed(123, kind = "L'Ecuyer-CMRG")
+catboost_fit<-list()
+for(j in 1:5){
+  catboost_fit[[j]]<-final_catboost[[j]] %>%
+    fit(all[Outer_mlr$train.inds[[j]],])}
+
+toc()
+stopCluster(cl)
+unregister()
+```
+
+# Feature importance
+```{r}
+overall_fi<-list()
+for(j in 1:5){
+overall_fi[[j]]<-extract_fit_engine(catboost_fit[[j]])}
+
+
+#model$feature_importances %>% as.data.frame() %>%arrange(desc(V1))
+
+````
+
+```{r}
+merge_fi<-list()
+for (j in 1:5) {merge_fi[[j]]<-overall_fi[[j]]$feature_importances %>% as.data.frame() %>%rownames_to_column()%>% arrange(desc(V1)) %>% mutate(Fold = j)}
+merge_fi<-do.call(rbind, merge_fi)
+```
+
+
+### Predict test set 
+
+```{r}
+
+
+# permance and statistics
+
+
+# train set predictions
+catboost_training_pred<-list()
+for(j in 1:5){catboost_training_pred[[j]] <- 
+  predict(catboost_fit[[j]], all[Outer_mlr$train.inds[[j]],]) %>% 
+  bind_cols(predict(catboost_fit[[j]],all[Outer_mlr$train.inds[[j]],], type = "prob")) %>% 
+  bind_cols(all[Outer_mlr$train.inds[[j]],] %>% select(bleg))}
+
+catboost_training_perf<-list()
+for(j in 1:5) {catboost_training_perf[[j]]<-catboost_training_pred[[j]] %>% 
+  accuracy(truth = bleg, .pred_class) %>%
+  bind_rows(catboost_training_pred[[j]]%>% roc_auc(truth = bleg, .pred_Yes, event_level="second"))%>%
+  bind_rows(catboost_training_pred[[j]]%>% sens(truth = bleg, .pred_class, event_level="second")) %>%
+  bind_rows(catboost_training_pred[[j]] %>% yardstick::spec(truth = bleg, .pred_class, event_level="second")) %>%
+  bind_rows(catboost_training_pred[[j]] %>% yardstick::precision(truth = bleg, .pred_class, event_level="second")) %>%
+  bind_rows(catboost_training_pred[[j]] %>% yardstick::f_meas(truth = bleg, .pred_class, event_level="second"))}
+
+catboost_train_cm<-list()
+for(j in 1:5) {catboost_train_cm[[j]]<-catboost_training_pred[[j]] %>% yardstick::conf_mat(truth = bleg, .pred_class)}
+
+# catboost_train_sum<-list()
+# for (j in 1:5){
+# catboost_train_sum[[j]]<-summary(catboost_train_cm[[j]], event_level = "second")}
+
+
+# test set predictions
+
+
+
+# train set predictions
+catboost_testing_pred<-list()
+for(j in 1:5){catboost_testing_pred[[j]] <- 
+  predict(catboost_fit[[j]], all[Outer_mlr$test.inds[[j]],]) %>% 
+  bind_cols(predict(catboost_fit[[j]],all[Outer_mlr$test.inds[[j]],], type = "prob")) %>% 
+  bind_cols(all[Outer_mlr$test.inds[[j]],] %>% select(bleg))}
+
+catboost_testing_perf<-list()
+for(j in 1:5) {catboost_testing_perf[[j]]<-catboost_testing_pred[[j]] %>% 
+  accuracy(truth = bleg, .pred_class) %>%
+  bind_rows(catboost_testing_pred[[j]]%>% roc_auc(truth = bleg, .pred_Yes, event_level="second"))%>%
+  bind_rows(catboost_testing_pred[[j]]%>% sens(truth = bleg, .pred_class, event_level="second")) %>%
+  bind_rows(catboost_testing_pred[[j]] %>% yardstick::spec(truth = bleg, .pred_class, event_level="second")) %>%
+  bind_rows(catboost_testing_pred[[j]] %>% yardstick::precision(truth = bleg, .pred_class, event_level="second"))%>%
+  bind_rows(catboost_testing_pred[[j]] %>% yardstick::f_meas(truth = bleg, .pred_class, event_level="second")) 
+}
+
+catboost_test_cm<-list()
+for(j in 1:5) {catboost_test_cm[[j]]<-catboost_testing_pred[[j]] %>% yardstick::conf_mat(truth = bleg, .pred_class)}
+
+# catboost_test_sum<-list()
+# for (j in 1:5){
+# catboost_test_sum[[j]]<-summary(catboost_test_cm[[j]], event_level = "second")}
+
+saveRDS( bind_rows(catboost_testing_perf, .id="Fold") %>% mutate(seed=123), "catboost_testing_perf.rds")
+saveRDS( bind_rows(catboost_training_perf, .id="Fold") %>% mutate(seed=123), "catboost_training_perf.rds")
+
+```
+
+
+
+# aggregate validation metrics (summarize = T)
+```{r}
+validation<-list()
+for(j in 1:5) {validation [[j]]<-metric_catboost[[j]] %>% filter(.config == best_auc_gs_catboost[[j]]$.config)%>% 
+  bind_cols(Fold = c(paste("Fold", sprintf('%0.1d', j), sep=""))) }
+validation<-do.call("rbind", validation)
+
+```
+
+# aggregate validation metrics (summarize = F)
+```{r}
+validation_sF<-list()
+for(j in 1:5) {validation_sF[[j]]<-collect_metrics(gs_catboost_res[[j]],summarize=F) %>% filter(.config == best_auc_gs_catboost[[j]]$.config)%>% 
+  bind_cols(Fold = c(paste("Fold", sprintf('%0.1d', j), sep=""))) }
+validation_sF<-do.call("rbind", validation_sF) %>% 
+  group_by(.metric) %>% summarise_at(.vars=".estimate", funs(mean=mean, se=sd(.)/sqrt(n()), n = n()))
+
+```
+
+# aggregate train metrics
+
+```{r}
+train<-list()
+for(j in 1:5) {train[[j]]<-catboost_training_perf[[j]] %>% 
+  bind_cols(Fold = c(paste("Fold", sprintf('%0.1d', j), sep=""))) }
+train<-do.call("rbind", train) %>% 
+  group_by(.metric) %>% summarise_at(.vars=".estimate", funs(mean=mean, se=sd(.)/sqrt(n()), n = n()))
+
+```
+
+
+# aggregate test metrics
+
+```{r}
+test<-list()
+for(j in 1:5) {test[[j]]<-catboost_testing_perf[[j]] %>% 
+  bind_cols(Fold = c(paste("Fold", sprintf('%0.1d', j), sep=""))) }
+test<-do.call("rbind", test) %>% 
+  group_by(.metric) %>% summarise_at(.vars=".estimate", funs(mean=mean, se=sd(.)/sqrt(n()), n = n()))
+
+```
+
+# compare models
+```{r}
+train
+validation_sF
+test
+
+```
+
+
+```{r}
+final_score<-train %>%
+    mutate(split ="train") %>%
+    bind_rows(validation_sF %>% mutate(split = "validation"))%>%
+    bind_rows(test %>% mutate(split = "test"))
+write.csv(final_score, "final_score_catboost_By_5x5.csv")
+```
+#best_hp
+```{r}
+best_hp<-do.call("rbind", best_auc_gs_catboost) %>%
+  mutate(Split=c("Split1", "Split2", "Split3", "Split4", "Split5"))
+write.csv(best_hp, "best_hp.csv")
+```
+
+## Save Predictions test set
+
+```{r}
+predictions_test<-list()
+for(i in 1:5) {predictions_test[[i]]<-catboost_testing_pred[[i]] %>%
+  select(bleg, catboost_Yes=.pred_Yes, catboost_No = .pred_No, catboost_pred=.pred_class) %>% bind_cols(all[Outer_mlr$test.inds[[i]],] %>% select(crop_id))}
+
+saveRDS(predictions_test, "predictions_test_catboost.rds")
+
+```
+
+
+# Export not aggregated test results
+
+```{r}
+catboost_test_results<-list()
+for (i in 1:5){catboost_test_results[[i]]<-catboost_testing_perf[[i]] %>% mutate(id =paste("Fold",i),
+                                                                           model = "catboost")} 
+catboost_test_results<-do.call("rbind", catboost_test_results)
+
+saveRDS(catboost_test_results, "catboost_test_results.rds")
+```
+
+
