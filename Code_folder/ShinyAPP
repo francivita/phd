@@ -1,0 +1,308 @@
+library(shiny)
+library(leaflet)
+library(leaflet.extras)
+library(dplyr)
+library(data.table)
+library(catboost)
+library(sf)
+library(ggplot2)
+library(tibble)
+library(gridExtra)
+library(formattable)
+library(DT)
+#library(mapview)
+model <- readRDS("C:/Users/Avogadro/PhD Blackleg/ML/FS break/catboost_rfe/final model/final_model_18.rds") 
+
+# Training set
+TrainSet <- readRDS("C:/Users/Avogadro/PhD Blackleg/SPUDS_EDA/ml/Seed1119_def.rds")
+Seed2020<- readRDS("C:/Users/Avogadro/PhD Blackleg/ML/SPUDS2020_18/Seed2020_def2.rds")
+ph_w_med<- st_read(
+  "C:/Users/Avogadro/PhD Blackleg/SOIL DATA/Hutton_pH_OpenData/soil_pH_W_Median.shp")
+
+organic_car<- st_read(
+  "C:/Users/Avogadro/PhD Blackleg/SOIL DATA/Hutton_TOC_WGS84/Scotland_TOC_WGS84.shp") %>%
+  st_transform(crs = "EPSG:27700")
+
+biowindvars_DSS<-readRDS("C:/Users/Avogadro/PhD Blackleg/UKMO_DSS/biowindvars_DSS.rds") %>%
+  st_as_sf( coords = c("LONG", "LAT"), crs = 4326) %>%
+  st_transform(crs = "EPSG:27700")
+
+ui <- bootstrapPage(
+  # Page header
+  headerPanel('Black-Cast'),
+  
+  sidebarLayout(
+    sidebarPanel(
+      
+      numericInput(inputId ="crop_id", label = "Seed-stock ID", value = NULL),
+      selectInput("variety", "Variety", choices = unique(TrainSet$variety), selected=NULL),
+      selectInput("variety_res", "Variety resistance rating (AHDB database)", choices = NULL, selected=NA),
+      sliderInput(inputId = "field_generation", label = "Field generation", value = 1,
+                  min = 1,
+                  max = 7),
+      radioButtons(inputId = "pre_basic",
+                   label = "Pre basic",
+                   choices = unique(TrainSet$pre_basic_attained),
+                   selected = NULL),
+      
+      
+      numericInput(inputId ="area_ha",label =  "Crop area (ha)", value = NULL),
+      
+      dateInput(inputId ="planting_day", label =  "Planting Day", value = NA),
+      actionButton("submitbutton", "Submit", class = "btn btn-primary")),
+    
+    mainPanel(
+      leafletOutput("map"),
+      #plotOutput("plot"),
+      # tableOutput('tabledata')
+      dataTableOutput("tabledata")
+      
+    )))
+
+server <- function(input, output, session) {
+  crop_id <- reactive({
+    filter(TrainSet, crop_id == input$crop_id)
+  })
+  observeEvent(crop_id(), {
+    choices <- unique(crop_id()$field_generation)
+    updateSliderInput(inputId = "field_generation", value = choices+1)
+  })
+
+  observeEvent(crop_id(), {
+    choices <- unique(crop_id()$pre_basic_attained)
+    updateRadioButtons(inputId = "pre_basic", selected = choices)
+  })
+  
+  observeEvent(crop_id(), {
+    choices <- unique(crop_id()$variety)
+    updateSelectInput(inputId = "variety", selected=choices)
+  })
+  variety <- reactive({
+    req(input$variety)
+    filter(TrainSet, variety == input$variety)
+  })
+  observeEvent(variety(), {
+    choices <- unique(variety()$variety_res)
+    updateSelectInput(inputId = "variety_res", choices= choices)
+  })
+  
+  #hidden variables
+  # observeEvent(crop_id(), {
+  #   choices <- unique(crop_id()$rh9002)
+  #   updateSelectInput(inputId = "rh9002", choices= choices)
+  # })
+  
+  output$map <- renderLeaflet({
+    leaflet() %>%
+      #addTiles()
+      addProviderTiles(providers$Esri.WorldImagery) %>%  
+      addMeasure(primaryLengthUnit = "meters", primaryAreaUnit = "hectares")%>%
+      setView(lng=-4.02, lat=56.49, zoom= 6)%>%
+      addDrawToolbar(
+        targetGroup = "draw",
+        polylineOptions = FALSE,
+        polygonOptions = FALSE,
+        rectangleOptions = FALSE,
+        circleOptions = FALSE,
+        circleMarkerOption=FALSE,
+        singleFeature=T,
+        editOptions = editToolbarOptions(
+          selectedPathOptions = selectedPathOptions()
+        )
+      )  %>%
+      addLayersControl(
+        overlayGroups = c("draw"),
+        options = layersControlOptions(collapsed = FALSE)
+      )  })
+  
+  
+  observeEvent(input$map_draw_new_feature, {
+    click_lat <- input$map_draw_new_feature$geometry$coordinates[[2]]
+    click_lng <- input$map_draw_new_feature$geometry$coordinates[[1]] 
+    # updateNumericInput(inputId = "north", value = click_lat)
+    #updateNumericInput(inputId = "east", value = click_lng) 
+  })
+  
+  
+  
+  
+  
+  
+  datasetInput <- reactive({
+    coord_cnv<-data.frame(lng=input$map_draw_new_feature$geometry$coordinates[[1]], lat=input$map_draw_new_feature$geometry$coordinates[[2]])%>%
+      st_as_sf(coords = c("lng", "lat")) %>%
+      st_set_crs("EPSG:4326") %>%
+      st_transform(crs = "EPSG:27700")
+    
+    
+    df <- data.frame(
+      Name = c("crop_id",
+               "field_generation",
+               "area_ha",
+               "north",
+               "east",
+               "pre_basic",
+               "variety_res",
+               "bleg_stock",
+               "day",
+               "p_h_w_med",
+               "organic_car",
+               "rh9002",
+               "bio4",
+               "bio15",
+               "bio13",
+               "bio7",
+               "bio5",
+               "bio11",
+               "bio1",
+               "rh9002_w",
+               "bio4_w",
+               "bio15_w",
+               "bio13_w",
+               "bio7_w",
+               "bio5_w",
+               "bio11_w",
+               "bio1_w"),
+      
+      Value = as.character(c(input$crop_id,
+                             
+                             input$field_generation,
+                             input$area_ha,
+                             coord_cnv$geometry[[1]][[1]],
+                             coord_cnv$geometry[[1]][[2]],
+                             input$pre_basic,
+                             input$variety_res,
+                             subset(TrainSet, crop_id == input$crop_id) %>% pull(bleg) %>% as.character(),
+                             yday(as.Date(input$planting_day)),
+                             ph_w_med[st_intersects(coord_cnv,ph_w_med)[[1]],] %>% pull(pH_W_Med),
+                             organic_car[st_intersects(coord_cnv,organic_car)[[1]],] %>% pull(organicCar),
+                             (biowindvars_DSS%>% filter(year==2018))[st_nearest_feature(coord_cnv, biowindvars_DSS%>%filter(year==2018)),] %>%
+                               pull(rh9002),
+                             (biowindvars_DSS%>% filter(year==2018))[st_nearest_feature(coord_cnv, biowindvars_DSS%>%filter(year==2018)),] %>% 
+                               pull(bio4),
+                             (biowindvars_DSS%>% filter(year==2018))[st_nearest_feature(coord_cnv, biowindvars_DSS%>%filter(year==2018)),] %>% 
+                               pull(bio15),
+                             (biowindvars_DSS%>% filter(year==2018))[st_nearest_feature(coord_cnv, biowindvars_DSS%>%filter(year==2018)),] %>% 
+                               pull(bio13),
+                             (biowindvars_DSS%>% filter(year==2018))[st_nearest_feature(coord_cnv, biowindvars_DSS%>%filter(year==2018)),] %>% 
+                               pull(bio7),
+                             (biowindvars_DSS%>% filter(year==2018))[st_nearest_feature(coord_cnv, biowindvars_DSS%>%filter(year==2018)),] %>% 
+                               pull(bio5),
+                             (biowindvars_DSS%>% filter(year==2018))[st_nearest_feature(coord_cnv, biowindvars_DSS%>%filter(year==2018)),] %>% 
+                               pull(bio11),
+                             (biowindvars_DSS%>% filter(year==2018))[st_nearest_feature(coord_cnv, biowindvars_DSS%>%filter(year==2018)),] %>% 
+                               pull(bio1),
+                             (biowindvars_DSS%>% filter(year==2012))[st_nearest_feature(coord_cnv, biowindvars_DSS%>%filter(year==2012)),] %>%
+                               pull(rh9002),
+                             (biowindvars_DSS%>% filter(year==2012))[st_nearest_feature(coord_cnv, biowindvars_DSS%>%filter(year==2012)),] %>% 
+                               pull(bio4),
+                             (biowindvars_DSS%>% filter(year==2012))[st_nearest_feature(coord_cnv, biowindvars_DSS%>%filter(year==2012)),] %>% 
+                               pull(bio15),
+                             (biowindvars_DSS%>% filter(year==2012))[st_nearest_feature(coord_cnv, biowindvars_DSS%>%filter(year==2012)),] %>% 
+                               pull(bio13),
+                             (biowindvars_DSS%>% filter(year==2012))[st_nearest_feature(coord_cnv, biowindvars_DSS%>%filter(year==2012)),] %>% 
+                               pull(bio7),
+                             (biowindvars_DSS%>% filter(year==2012))[st_nearest_feature(coord_cnv, biowindvars_DSS%>%filter(year==2012)),] %>% 
+                               pull(bio5),
+                             (biowindvars_DSS%>% filter(year==2012))[st_nearest_feature(coord_cnv, biowindvars_DSS%>%filter(year==2012)),] %>% 
+                               pull(bio11),
+                             (biowindvars_DSS%>% filter(year==2012))[st_nearest_feature(coord_cnv, biowindvars_DSS%>%filter(year==2012)),] %>% 
+                               pull(bio1))
+      ),
+      stringsAsFactors = FALSE)
+    write.csv(df, "df.csv")
+    
+    bleg <- 0
+    df2 <- rbind(df %>% filter(Name != "rh9002",
+                               Name != "bio4",
+                               Name != "bio15",
+                               Name != "bio13",
+                               Name != "bio7",
+                               Name != "bio5",
+                               Name != "bio11",
+                               Name != "bio1")%>%
+                   mutate(Name=case_when(Name=="rh9002_w"~"rh9002",
+                                         Name=="bio4_w"~"bio4",
+                                         Name=="bio15_w"~"bio15",
+                                         Name=="bio13_w"~"bio13",
+                                         Name == "bio7_w"~"bio7",
+                                         Name == "bio5_w"~"bio5",
+                                         Name == "bio11_w"~"bio11",
+                                         Name == "bio1_w"~"bio1",
+                                         TRUE~Name)), bleg)
+    input2 <- transpose(df2)
+    write.table(input2,"input2.csv", sep=",", quote = FALSE, row.names = FALSE, col.names = FALSE)
+    test2 <- read.csv(paste("input2", ".csv", sep=""), header = TRUE) %>% mutate_if(is.character,as.factor) %>%
+      mutate(variety_res=as.factor(variety_res))
+    
+    df <- rbind(df %>% select(-contains("_w")), bleg)
+    input <- transpose(df)
+    write.table(input,"input.csv", sep=",", quote = FALSE, row.names = FALSE, col.names = FALSE)
+    test <- read.csv(paste("input", ".csv", sep=""), header = TRUE) %>% mutate_if(is.character,as.factor) %>%
+      mutate(variety_res=as.factor(variety_res))
+    
+    
+    
+    Output<-matrix(c(
+      predict(model,test,type="prob") %>% mutate(class=ifelse(.pred_Yes>=0.4,"Yes","No")) %>% pull(class),
+      predict(model,test2,type="prob") %>% mutate(class=ifelse(.pred_Yes>=0.4,"Yes","No")) %>% pull(class),
+      predict(model,test,type="prob") %>% mutate(class=ifelse(.pred_Yes>=0.57,"Yes","No")) %>% pull(class),
+      predict(model,test2,type="prob") %>% mutate(class=ifelse(.pred_Yes>=0.57,"Yes","No")) %>% pull(class),
+      predict(model,test,type="prob") %>% pull(.pred_Yes),
+      predict(model,test2,type="prob") %>% pull(.pred_Yes)), ncol=3)
+    rownames(Output)<-c("Good-year", "Bad-year")
+    
+    colnames(Output)<-c("Liberal", "Conservative", "Predictions")
+    
+    Output<-Output%>%as.data.frame()%>% 
+      rownames_to_column()%>%
+      mutate(" " = rowname,
+             'Blackleg risk %' = round(as.numeric(Predictions)*100,1) ,
+             Conservative=ifelse(Conservative == "Yes", TRUE, FALSE),
+             Liberal=ifelse(Liberal == "Yes", TRUE, FALSE)) %>%
+      select(" ", 'Blackleg risk %', Conservative, Liberal)
+    
+    
+    
+    
+    print(Output)
+    
+    
+  })
+ 
+  
+  output$contents <- renderPrint({
+    if (input$submitbutton>0) { 
+      isolate("Calculation complete.") 
+    } else {
+      return("Server is ready for calculation.")
+    }
+  })
+  
+  
+  
+  output$tabledata <- renderDataTable({
+    if (input$submitbutton>0){
+      as.datatable(formattable(isolate(datasetInput()), list(
+        "Scenarios" = formatter("span", style = ~ style(color = "grey",font.weight = "bold")),
+        area(col = `Blackleg risk %`) ~ color_bar("pink"),
+        "Conservative" = formatter("span",
+                                   style = x ~ style(color = ifelse(x,  "red", "green")),
+                                   x ~ icontext(ifelse(x,"remove", "ok"), ifelse(x, "Yes", "No"))),
+        "Liberal" = formatter("span",
+                              style = x ~ style(color = ifelse(x, "red", "green")),
+                              x ~ icontext(ifelse(x, "remove", "ok"), ifelse(x, "Yes", "No"))))
+      ))
+      
+    }
+  }
+  )
+  
+
+  
+}
+
+
+
+shinyApp(ui, server)
+
