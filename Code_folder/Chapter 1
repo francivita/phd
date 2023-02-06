@@ -1,0 +1,1128 @@
+---
+title: "stabsel output"
+author: "Francesco Civita"
+date: "13/11/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Load libraries
+
+```{r, message = F}
+
+
+library(dplyr)
+library(skimr)
+library(tidyr)
+library(lubridate)
+library(janitor)
+library(tidymodels)
+library(tune)
+library(tidyverse)
+library(tictoc)
+library(mlr)
+library(stabs)
+
+```
+# Clean r's brain
+
+```{r, message = FALSE}
+
+rm(list=ls())
+
+```
+
+# Import data
+
+```{r}
+
+Seed1119_def<-readRDS("C:/Users/Avogadro/PhD Blackleg/SPUDS_EDA/ml/Seed1119_def.rds")
+
+```
+
+
+# Prepare data
+## Select and transform predictor variables
+
+```{r}
+
+Seed1119_def_all<-Seed1119_def %>% 
+ 
+  
+  dplyr::select(crop_id,
+                # coordinates/location
+                east, north, field, pre_basic,
+                #crop traits
+                area_ha, field_generation, week, month, day,
+                organic, variety_res,
+                # inspections
+                  insp_1_pre_roguing, insp_2_pre_roguing,insp_1_rogues, insp_2_rogues, insp_1_variations, insp_2_variations,insp_1_groundkeepers, insp_2_groundkeepers,x2nd_insp_date,
+                 #rogues, variations, groundkeepers,pre_roguing,
+                # between seasons risk factors
+                bleg_stock,
+                # soil
+                p_h_w_med,awc,organic_car,soil250k,
+                #topography
+                slope_perc, elevation, aspect,
+                # spatial features
+                ware_dist, coast_dist,near_field, river_dist,
+                #bioclimatic_variables
+                c(bio1:bio19), c(wind01:wind03), c(wind06:wind07),c(wind15:wind21), 
+                c(rh9001:rh9005),
+                #outcome
+                bleg)%>%
+   
+ #mutate(pre_roguing = case_when(pre_roguing>0~"Yes", TRUE~"No"))%>%
+ mutate(bleg_stock = as.character(bleg_stock))%>%
+ #mutate(bleg_stock=case_when(bleg_stock=="unknown"~"No", TRUE~bleg_stock))%>%
+  
+ mutate(insp_1_pre_roguing = case_when(insp_1_pre_roguing>0~"Yes", TRUE~"No"))%>%
+ mutate(insp_2_pre_roguing = case_when(
+   is.na(x2nd_insp_date) & is.na(insp_2_pre_roguing)~"no_insp",
+   !is.na(x2nd_insp_date) & insp_2_pre_roguing>0~"Yes",
+                                        TRUE~"No"))%>%
+ mutate(insp_1_rogues = case_when(insp_1_rogues>0~"Yes", TRUE~"No"))%>%
+ mutate(insp_2_rogues = case_when(
+   is.na(x2nd_insp_date) & is.na(insp_2_rogues)~"no_insp",
+   !is.na(x2nd_insp_date) & insp_2_rogues>0~"Yes", TRUE~"No"))%>%
+mutate(insp_1_variations = case_when(insp_1_variations>0~"Yes", TRUE~"No"))%>%
+   mutate(insp_2_variations = case_when(is.na(x2nd_insp_date) & is.na(insp_2_variations)~"no_insp",
+                                        !is.na(x2nd_insp_date) & insp_2_variations>0~"Yes",
+                                        TRUE~"No"))%>% 
+  mutate(insp_1_groundkeepers = case_when(insp_1_groundkeepers>0~"Yes", TRUE~"No"))%>%
+   mutate(insp_2_groundkeepers = case_when(is.na(x2nd_insp_date) & is.na(insp_2_groundkeepers )~"no_insp",
+                                        !is.na(x2nd_insp_date) & insp_2_groundkeepers >0~"Yes",
+                                        TRUE~"No"))%>%
+  
+   mutate(northness = cos(aspect*pi/180),
+         eastness= sin(aspect*pi/180),.keep="unused")%>%
+  
+# aggregate variety resistance score: low (1:2), medium (3:7), high (8:9)
+  mutate(variety_res = case_when(
+                                  variety_res == 1~ "low_res",
+                                  variety_res == 2 ~"low_res",
+                                  variety_res == 3 ~"medium_res",
+                                  variety_res == 4 ~"medium_res",
+                                  variety_res == 5 ~"medium_res",
+                                  variety_res == 6 ~"medium_res",
+                                  variety_res == 7 ~"medium_res",
+                                  variety_res == 8 ~"high_res",
+                                  variety_res == 9~"high_res",
+                                  variety_res == "unknown"~"unknown"
+                                  ))%>%
+# aggregate Soil 250k classes:  EART (EART), PODZ (PTYPODZ, HIP), ALLU (ALLU), GLEY (MING), Other (IMMA, PEAT, PTYGLEY)
+  mutate(soil250k=as.character(soil250k))%>%
+  mutate(soil250k = case_when(
+                          soil250k == "EART"~"EART",
+                          soil250k=="PTYPODZ"~"PODZ",
+                          soil250k == "HIP"~"PODZ",
+                          soil250k == "ALLU"~"ALLU",
+                          soil250k=="MING"~"GLEY",
+                          soil250k=="PTYGLEY"~"other",
+                          soil250k=="IMMA"~"other",
+                          soil250k=="PEAT"~"other",
+                          TRUE~soil250k)) %>%
+  
+# merge variations and rogues
+  
+  
+    mutate(insp_1_rogues_variations = case_when(insp_1_rogues == "Yes" |
+                                      insp_1_variations == "Yes"~"Yes",
+                                       TRUE ~ "No"), .keep="unused")%>%
+    #
+    mutate(insp_2_rogues_variations = case_when(is.na(x2nd_insp_date)~"no_insp",
+                                        insp_2_rogues == "Yes" |
+                                       insp_2_variations == "Yes"~"Yes",
+                                       
+                                       TRUE ~ "No"), .keep="unused")%>%
+ 
+# convert characters in factors
+  mutate_if(is.character, as.factor) %>%
+
+# omit NAs  
+  na.omit()
+
+
+# Define reference class (for the dummy creation step)
+Seed1119_def_all$variety_res = factor(Seed1119_def_all$variety_res, levels=c("medium_res", "high_res","low_res","unknown"))
+
+Seed1119_def_all$soil250k = factor(Seed1119_def_all$soil250k, levels=c("EART","GLEY", "PODZ", "ALLU","other", "unknown"))
+
+# Summary results
+
+skim(Seed1119_def_all)
+
+
+
+
+```
+
+
+```{r}
+# remove levels with 0 records (i.e. soil250k "unknown")
+Seed1119_def_all<-Seed1119_def_all %>%
+ filter(soil250k != "unknown") %>%
+ #filter(aspect_8 != "flat") %>%
+ droplevels() 
+
+```
+
+
+
+## Create the grouping variable "farm"
+```{r}
+all_complete<-Seed1119_def_all %>%
+
+left_join(
+Seed1119_def_all %>%
+  # group by field
+  group_by(field) %>%
+  # select unique field ID
+  unique() %>%
+  # count how repetitions for each unique field ID
+  count() %>%
+  # remove grouping factor
+  ungroup() %>%
+  # create the variable 'farm' (number unique fields from 0  to N) and join by field ID
+  mutate(farm=rep(0:(nrow(.)-1))), by=c( "field")) %>%
+  # convert 'farm' in a factor
+  mutate(farm = as.factor(farm)) %>%
+  # remove field ID and n of repetitions (count) 
+  select(-field, -n) %>%
+  arrange(farm)
+
+set.seed(123)
+#shuffle the rows
+all_complete<-all_complete[sample(nrow(all_complete)),]
+```
+
+
+
+```{r}
+set.seed(123)
+split_all<-group_vfold_cv(all_complete, group = farm, v=5)
+split_all$splits[[1]]$out_id<-populate(split_all$splits[[1]])$out_id
+
+all<-all_complete[split_all$splits[[1]]$in_id,]
+all_test<-all_complete[split_all$splits[[1]]$out_id,]
+ intersect(all_test %>% select(farm) %>% pull(),all %>% select(farm) %>% pull())
+```
+
+
+## Create resampling indices
+
+```{r}
+
+all2 = all %>% select(field_generation,bleg)
+
+set.seed(123)
+resDesc <- makeResampleDesc("Bootstrap",iters=100,blocking.cv = TRUE)
+tsk = makeClassifTask(data = as.data.frame(all2), target = "bleg", blocking = all$farm)
+res = resample("classif.rpart", tsk, resampling = resDesc)
+```
+
+## Transform indices in a rsplit object
+
+```{r}
+# create 3 lists for: analysis indices (train), testing indices and an indices list which combines the former two.
+
+boot.analysis<-list()
+boot.testing<-list()
+indices <- list()
+
+# fill every element of the lists with indices
+for (i in 1:100){
+  boot.analysis[[i]] <- res$pred$instance$train.inds[[i]]
+  boot.testing[[i]] <- res$pred$instance$test.inds[[i]]
+ 
+}
+
+#combine boot.analysis and boot.testing in a unique list
+for(i in 1:100){indices[[i]]<-
+list(analysis = c(boot.analysis[[i]]), assessment =c(boot.testing[[i]]))
+}
+
+# make splits
+splits <- lapply(indices, make_splits, data =all %>% select(-farm))
+
+#create a rsplit object
+manual_boots<-manual_rset(splits, c(paste("Bootstrap", sprintf('%0.3d', 1:100), sep="")))
+
+rm(boot.analysis)
+rm(boot.testing)
+rm(splits)
+
+```
+
+### Check if indices overlap
+```{r}
+
+intersection<-list()
+
+for(i in 1:100){
+  intersection[[i]]<-intersect(indices[[i]]$analysis, indices[[i]]$assessment)
+}
+
+intersection<-do.call("rbind", intersection)
+
+sum(intersection)
+
+rm(intersection)
+```
+### Check if "farms" ID overlap
+```{r}
+intersection<-list()
+
+for(i in 1:100){
+  intersection[[i]]<-intersect(all[indices[[i]]$analysis] %>% select(farm) %>% pull()%>% as.numeric(), all[indices[[i]]$assessment]%>% select(farm) %>% pull() %>% as.numeric())
+  }
+intersection<-do.call("rbind", intersection)
+
+sum(intersection)
+
+rm(intersection)
+```
+
+### Compute number of crops in train and test samples
+```{r}
+ncrops_train<-list()
+ncrops_test<-list()
+
+for(i in 1:100){
+ncrops_train[[i]]<- all[indices[[i]]$analysis] %>% nrow()
+  ncrops_test[[i]]<- all[indices[[i]]$assessment] %>% nrow()
+  }
+ncrops_train<-do.call("rbind", ncrops_train) %>% 
+  as.data.frame %>% 
+  mutate(ncrops=V1, .keep="unused") %>% 
+  mutate(prop = ncrops/dim(all)[1])%>%
+  mutate(boot = c(paste("Bootstrap", sprintf('%0.3d', 1:100), sep="")))
+  
+ncrops_test<-do.call("rbind", ncrops_test) %>% 
+  as.data.frame()%>%
+  mutate(ncrops=V1, .keep="unused") %>% 
+  mutate(prop = ncrops/dim(all)[1])%>%
+  mutate(boot = c(paste("Bootstrap", sprintf('%0.3d', 1:100), sep="")))
+
+ncrops_train %>% summarise(train_main=mean(ncrops), train_sd=sd(ncrops), prop_mean=mean(prop), prop_sd=sd(prop))
+ncrops_test %>% summarise(test_main=mean(ncrops), test_sd=sd(ncrops), prop_mean=mean(prop), prop_sd=sd(prop))
+```
+
+
+
+### Compute blackleg incidence in train and test samples
+
+```{r}
+incidence_train<-list()
+incidence_test<-list()
+
+for(i in 1:100){
+ incidence_train[[i]]<- all[indices[[i]]$analysis] %>% select(bleg) %>%  summarise(incidence=mean(bleg == "Yes"))
+  incidence_test[[i]]<- all[indices[[i]]$assessment] %>% select(bleg) %>%  summarise(incidence=mean(bleg == "Yes"))
+ 
+  }
+incidence_train<-do.call("rbind", incidence_train) %>% mutate(boot = c(paste("Bootstrap", sprintf('%0.3d', 1:100), sep="")))
+incidence_test<-do.call("rbind", incidence_test) %>% mutate(boot = c(paste("Bootstrap", sprintf('%0.3d', 1:100), sep="")))
+
+incidence_train %>% summarise(train_main=mean(incidence), train_sd=sd(incidence))
+incidence_test %>% summarise(test_main=mean(incidence), test_sd=sd(incidence))
+```
+
+
+## Create ensamble recipe
+```{r}
+ens_rec<- 
+    # exclude grouping variable "farm" 
+    recipe(bleg ~ ., data =all %>% select(-farm)) %>% 
+    # update role for "crop_id"
+    update_role(crop_id, new_role = "cropId") %>%
+    # transform categorical variables in dummy
+    step_dummy(all_nominal(), - crop_id, -all_outcomes()) %>%
+    # standardize variables (here is called normalize)
+    step_normalize(all_predictors(), -crop_id, - all_outcomes())  %>%
+    
+    # omit NAs
+    step_naomit(all_predictors())
+    
+    # prepare recipe
+    ens_prep <- prep(ens_rec)
+    # preprocessed data summary
+    skim(juice(ens_prep))
+    
+    
+```
+
+
+
+# Tune Lasso
+
+```{r}
+
+# Set model specification (penalty = lambda, mixture = alpha). LASSO logistic regression has mixture = 1
+lasso_spec<-(logistic_reg(
+    penalty = tune(),
+    mixture = 1) %>% 
+      set_mode("classification") %>%
+      set_engine("glmnet"))
+
+# Set workflow
+lasso_wf<-workflow() %>%
+   # Add recipe
+   add_recipe(ens_rec) %>%
+   # Add model specification
+   add_model(lasso_spec)
+   
+# Get HPs info
+hp_arg_lasso<-tune_args(lasso_wf, verbose =T)
+# Set seed to generate the same grid of hyperparameters
+set.seed(123)
+# Create HPs grid
+hp_grid_lasso<-dials::parameters(lasso_wf) %>%
+update(penalty=penalty(range=c(-5,0)))%>%
+grid_latin_hypercube(size=100)
+    
+
+
+# Start Parallel
+library(tictoc)
+library(doParallel)
+cl<-makePSOCKcluster(4)
+    registerDoParallel(cl)
+tic()
+
+# Set seed for reproducibility 
+set.seed(123)
+# Tuning results
+gs_lasso_res <- tune_grid(
+  # add model workflow
+  lasso_wf, 
+  # add resamples
+  resamples = manual_boots, 
+  # add HPs grid
+  grid = hp_grid_lasso,
+  # set metrics
+  metrics = metric_set(accuracy,
+                       roc_auc,
+                       sens,
+                       yardstick::spec,
+                       pr_auc,
+                       yardstick::precision,
+                       yardstick::npv,
+                       yardstick::f_meas,
+                       ),
+  # set options
+  control = control_grid(
+    # don't save workflow (dfault = F)
+    save_workflow = F,
+    # save predictions
+    save_pred = TRUE, 
+    # set verbose mode
+    verbose = TRUE, 
+    # set event level (according to factor level of the outcome)
+    event_level = "second",
+    # extract model results for each iteration
+    extract = function (x) extract_model(x)))
+
+
+# stop Parallel
+toc()
+stopCluster(cl)
+
+#560.02
+
+```
+
+### Save tuning results
+
+```{r}
+saveRDS(gs_lasso_res, "gs_lasso_res.rds")
+
+```
+
+### Plot metric values vs penalty values (lambda)
+
+```{r}
+gs_lasso_res%>%
+  collect_metrics() %>%
+  filter(.metric=="accuracy" | .metric == "roc_auc" | .metric=="sens"| .metric=="spec"|| .metric =="pr_auc" |.metric == "precision" |.metric == "f_meas") %>%
+  ggplot(aes(penalty, mean, color = .metric)) +
+  geom_errorbar(aes(
+    ymin = mean - std_err,
+    ymax = mean + std_err
+  ),
+  alpha = 0.5
+  ) +
+  geom_line(size = 1.5) +
+  facet_wrap(~.metric, scales = "free", nrow = 2) +
+  scale_x_log10() +
+  theme(legend.position = "none")
+
+```
+### Collect metrics
+
+```{r}
+
+# Collect metrics
+
+metrics_lasso<- gs_lasso_res %>%
+  collect_metrics()
+
+metrics_lasso
+
+# Show first 10 best scores for each metric
+
+gs_lasso_res %>%
+  show_best("accuracy")
+
+gs_lasso_res %>%
+  show_best("roc_auc")
+
+gs_lasso_res %>%
+  show_best("sens")
+
+gs_lasso_res %>%
+  show_best("spec")
+
+gs_lasso_res %>%
+  show_best("pr_auc")
+
+gs_lasso_res %>%
+  show_best("precision")
+
+gs_lasso_res %>%
+  show_best("f_meas")
+
+
+
+
+```
+
+# Best AUROC
+
+```{r}
+# save the best mo
+best_auc_gs_lasso<-select_best(gs_lasso_res, "roc_auc")
+
+best_auc_gs_lasso
+
+
+```
+
+## Confusion Matrix
+
+
+```{r}
+predictions<-data.table::rbindlist(gs_lasso_res$.predictions, idcol=T)
+predictions %>%
+  filter(.config==best_auc_gs_lasso$.config) %>%
+  conf_mat(bleg, .pred_class)
+```
+
+
+# Stability index (Nuogueira et al., 2017)
+```{r}
+
+getStability <- function(X,alpha=0.05) {
+  ## the input X is a binary matrix of size M*d where:
+  ## M is the number of bootstrap replicates
+  ## d is the total number of features
+  ## alpha is the level of significance (e.g. if alpha=0.05, we will get 95%   confidence intervals)
+  ## it's an optional argument and is set to 5% by default
+  ### first we compute the stability
+  
+  M<-nrow(X)
+  d<-ncol(X)
+  hatPF<-colMeans(X)
+  kbar<-sum(hatPF)
+  v_rand=(kbar/d)*(1-kbar/d)
+  stability<-1-(M/(M-1))*mean(hatPF*(1-hatPF))/v_rand ## this is the stability estimate
+  
+  ## then we compute the variance of the estimate
+  ki<-rowSums(X)
+  phi_i<-rep(0,M)
+  for(i in 1:M){ 
+    phi_i[i]<-(1/v_rand)*((1/d)*sum(X[i,]*hatPF)-(ki[i]*kbar)/d^2-(stability/2)*((2*kbar*ki[i])/d^2-ki[i]/d-kbar/d+1))
+  }
+  phi_bar=mean(phi_i)
+  var_stab=(4/M^2)*sum((phi_i-phi_bar)^2) ## this is the variance of the stability estimate
+  
+  ## then we calculate lower and upper limits of the confidence intervals
+  z<-qnorm(1-alpha/2) # this is the standard normal cumulative inverse at a level 1-alpha/2
+  upper<-stability+z*sqrt(var_stab) ## the upper bound of the (1-alpha) confidence interval
+  lower<-stability-z*sqrt(var_stab) ## the lower bound of the (1-alpha) confidence interval
+  
+  return(list("stability"=stability,"variance"=var_stab,"lower"=lower,"upper"=upper))
+  
+}
+```
+
+## Create matrix
+```{r}
+
+# set the number of bootstrap
+n_boots<-dim(manual_boots)[1]
+
+# set the number of variables
+num_variables = dim(juice(ens_prep))[2]
+
+# set the number of features used in the training process (exclude crop_id and the outcome)
+num_features = num_variables-2 
+
+# set the number of lambda values
+lambda<-dim(hp_grid_lasso)[1]
+
+# create a list to collect results
+lasso_fs.matrix.ls <- list()
+
+
+# create a list to store coefficients
+c<-list()
+
+
+for(j in 1:lambda) {
+for(i in 1:n_boots){
+  # extract coefficients
+  c[[i]]<-coef(
+    gs_lasso_res$.extracts[[i]]$.extracts[[j]],
+    s=gs_lasso_res$.metrics[[1]]$penalty[j]) %>%
+    # convert the sparse matrix into a matrix
+    as.matrix() %>%
+    # convert into a dataframe
+    as.data.frame() %>%
+   
+     mutate(variables = rownames(.),
+           coeff = `s1`, .keep="unused") %>%
+    # remove the Intercept
+    filter(variables != "(Intercept)") %>%
+    # convert coefficients to a binary variable: discarded (0), retained (1)
+    mutate(coeff = case_when(coeff==0~0,
+                             TRUE~1)) 
+  }
+  
+  coeff<-c %>%purrr::reduce(dplyr::left_join, by = c("variables"))
+
+  lasso_fs.matrix.ls[[j]]<-setNames(data.frame(t(coeff[,-1])), coeff[,1]) %>% 
+  rownames_to_column() %>%  
+  select(-rowname)
+
+  
+}
+
+
+```
+
+
+#Create a matrix but with the coefficient average
+```{r}
+
+
+# set the number of bootstrap
+# n_boots<-dim(manual_boots)[1]
+# 
+# # set the number of variables
+# num_variables = dim(juice(ens_prep))[2]
+# 
+# # set the number of features used in the training process (exclude crop_id and the outcome)
+# num_features = num_variables-2 
+# 
+# # set the number of lambda values
+# lambda<-dim(hp_grid_lasso)[1]
+# 
+# # create a list to collect results
+ lasso_fs.matrix.ls2 <- list()
+
+
+# create a list to store coefficients
+c2<-list()
+
+
+for(j in 1:lambda) {
+for(i in 1:n_boots){
+  # extract coefficients
+  c2[[i]]<-coef(
+    gs_lasso_res$.extracts[[i]]$.extracts[[j]],
+    s=gs_lasso_res$.metrics[[1]]$penalty[j]) %>%
+    # convert the sparse matrix into a matrix
+    as.matrix() %>%
+    # convert into a dataframe
+    as.data.frame() %>%
+   
+     mutate(variables = rownames(.),
+           coeff = `s1`, .keep="unused") 
+    # remove the Intercept
+    #filter(variables != "(Intercept)")
+    # convert coefficients to a binary variable: discarded (0), retained (1)
+    # mutate(coeff = case_when(coeff==0~0,
+    #                          TRUE~1)) 
+  }
+  
+  coeff2<-c2 %>%purrr::reduce(dplyr::left_join, by = c("variables"))
+
+  lasso_fs.matrix.ls2[[j]]<-setNames(data.frame(t(coeff2[,-1])), coeff2[,1]) %>% 
+  rownames_to_column() %>%  
+  select(-rowname)
+
+  
+}
+
+```
+
+
+
+## Compute stability 
+
+```{r}
+
+
+lasso_results<-as.data.frame(array(0,dim=c(lambda,4)))
+
+for (j in 1:lambda){
+  for(i in 1:4) {
+    lasso_results[j,i] <- 
+      getStability( unname(as.matrix(lasso_fs.matrix.ls[[j]])),alpha=0.05)[i]
+  }
+}
+
+stability<-lasso_results %>%
+           mutate(stability =  V1,
+                  variance = V2,
+                  lower_bound = V3,
+                  upper_bound = V4, .keep="unused") %>%
+  
+  bind_cols(lambda = gs_lasso_res$.metrics[[1]]$penalty[c(1:lambda)]) %>%
+  mutate( n = n_boots)
+
+stability
+
+```
+
+
+#average n of feature selected for each lambda
+
+```{r}
+# lasso matrix is a list with j = lamda and each row of a j is a bootstrap iteration. To have the average number of features selected by each iteration we first average by column so we get selection frequency for each variable
+
+
+max_p<-lasso_fs.matrix.ls[[j]]%>%
+  summarise_all(mean) %>%
+  bind_rows(lasso_fs.matrix.ls[[j]] %>% as.data.frame() %>%
+  summarise_all(sum)) %>%
+  t %>% as.data.frame() %>%
+  mutate(mean = V1, sd = V2, se = sd/sqrt(100),.keep="unused") %>% 
+  filter(mean>0) 
+
+averagep<-vector()
+# average number of predictors by lambda
+for (j in 1:100){ averagep[j]<-lasso_fs.matrix.ls[[j]]%>% t %>% as.data.frame() %>% 
+  # number of selected predictors per bootstrap
+  summarise_all(sum) %>%
+  rowMeans()}
+
+
+averagep<-averagep%>%as.data.frame() 
+  colnames(averagep)<-"av selected"
+ averagep<-averagep%>%
+  bind_cols(model=paste("Preprocessor1_Model", sprintf('%0.3d', 1:dim(hp_grid_lasso)[1]), sep=""))
+
+ # lebanon %>%
+ #  filter(!is.na(social_trust), 
+ #         !is.na(sect), 
+ #         sect != "Armenian", 
+ #         sect != "Just a Muslim",
+ #         sect != "Other") %>%
+ #  group_by(sect) %>%
+ #  count(social_trust) %>% 
+ #  mutate(prop = n / sum(n), 
+ #         lower = lapply(n, prop.test, n = sum(n)), 
+ #         upper = sapply(lower, function(x) x$conf.int[2]), 
+ #         lower = sapply(lower, function(x) x$conf.int[1]))
+
+ #variable selected per 100 bootstrap
+
+#poisson.test(42, conf.level = 0.95 )$conf.int
+```
+
+```{r}
+
+d_re<-stability %>%
+   select(lambda, stability, lower_bound, upper_bound) %>%
+  left_join(gs_lasso_res %>% 
+    collect_metrics() %>% 
+    filter(.metric =="roc_auc") %>%
+    mutate(ROC_AUC = mean,
+           lower_bound_ROC = mean - (1.96*std_err), 
+           upper_bound_ROC = mean + (1.96*std_err),
+           lambda=penalty,.keep="unused") %>%
+      
+    select(ROC_AUC,lower_bound_ROC, upper_bound_ROC,lambda), 
+    by =c("lambda")) %>%
+    mutate( model = paste("Preprocessor1_Model", sprintf('%0.3d', 1:dim(hp_grid_lasso)[1]), sep=""),.keep="unused")  %>%
+  na.omit()
+```
+
+# Pareto front analysis
+
+```{r}
+#reproduce algorithm 2
+
+acc.const<-0.01
+stab.const<-0
+
+# remove all the model with ROC_AUC <= ROC_AUC - acc.const
+# print the model with best stability of the remaining models
+trade_off<-d_re %>% 
+  filter(!ROC_AUC < max(ROC_AUC) - acc.const) %>%
+  #Among the remaining configurations, determine the maximal stability stab.max.
+  # Remove all configurations with stability < stab.max − stab.const
+  filter(!stability < max(stability) - stab.const) %>%
+  #Among the remaining configurations, determine the maximal accuracy aUC.max.end
+  # Remove all configurations with accuracy < acc.max.end.
+  filter(!ROC_AUC<max(ROC_AUC)) 
+
+trade_off
+  
+```
+
+# what are the selected models?
+
+```{r}
+best_auc_gs_lasso
+trade_off
+
+max_stab<-d_re %>% filter(stability == max(stability)) %>% slice(1)
+max_stab
+
+
+final_models<-best_auc_gs_lasso %>% select(penalty,.config)%>%mutate(method="maxAUROC")%>%
+  bind_rows(trade_off %>% select(penalty=lambda,.config=model)%>% mutate(method="tradeoff"))%>%
+  bind_rows(max_stab %>% select(penalty=lambda,.config=model)%>% mutate(method="maxstab"))
+
+final_models
+```
+
+#final fit and test
+
+
+```{r}
+
+# finalize workflow
+final_lasso<-list()
+for(i in 1:3){
+  final_lasso[[i]]<-
+  lasso_wf %>% 
+  finalize_workflow(final_models[i,])}
+
+# start Parallell
+library(tictoc)
+library(doParallel)
+cl<-makePSOCKcluster(4)
+    registerDoParallel(cl)
+tic()
+
+# set seed for reproducibility
+set.seed(123)
+
+# fit all the training data
+
+  final_fit<-list()
+ for(i in 1:3){final_fit[[i]] <- final_lasso[[i]] %>%
+  fit(all %>% select(-farm))}
+
+
+# extract coefficients  
+  coeff_lasso<-list()
+  for(i in  1:3){coeff_lasso[[i]] <-final_fit[[i]]%>%
+  pull_workflow_fit() %>%
+  tidy() }
+  
+
+# stop parallel
+toc()
+stopCluster(cl)
+```
+
+
+```{r}
+
+
+
+
+
+# train set predictions
+best_pred <- 
+  predict(final_fit[[1]], all_test) %>% 
+  bind_cols(predict(final_fit[[1]], all_test, type = "prob")) %>% 
+  bind_cols(all_test %>% select(bleg)) %>%
+  # mutate(.pred_class =ifelse(.pred_Yes>0.6, "Yes", "No")) %>%
+  mutate_if(is.character, as.factor)
+
+best_perf<-best_pred %>% 
+accuracy(truth = bleg, .pred_class) %>%
+  bind_rows(best_pred%>% roc_auc(truth = bleg, .pred_Yes, event_level="second"))%>%
+  bind_rows(best_pred%>% pr_auc(truth = bleg, .pred_Yes, event_level="second"))%>%
+  bind_rows(best_pred%>% sens(truth = bleg, .pred_class, event_level="second")) %>%
+  bind_rows(best_pred %>% yardstick::spec(truth = bleg, .pred_class, event_level="second")) %>%
+ bind_rows(best_pred %>% yardstick::precision(truth = bleg, .pred_class, event_level="second")) %>%
+  bind_rows(best_pred %>% yardstick::npv(truth = bleg, .pred_class, event_level="second")) %>%
+ bind_rows(best_pred %>% yardstick::f_meas(truth = bleg, .pred_class, event_level="second"))
+
+best_perf
+
+trade_pred <- 
+  predict(final_fit[[2]], all_test) %>% 
+  bind_cols(predict(final_fit[[2]], all_test, type = "prob")) %>% 
+  bind_cols(all_test %>% select(bleg))%>%
+  # mutate(.pred_class =ifelse(.pred_Yes>0.6, "Yes", "No"))%>%
+  mutate_if(is.character, as.factor)
+
+
+trade_perf<-trade_pred %>% 
+accuracy(truth = bleg, .pred_class) %>%
+  bind_rows(trade_pred%>% roc_auc(truth = bleg, .pred_Yes, event_level="second"))%>%
+  bind_rows(trade_pred%>% pr_auc(truth = bleg, .pred_Yes, event_level="second"))%>%
+  bind_rows(trade_pred%>% sens(truth = bleg, .pred_class, event_level="second")) %>%
+  bind_rows(trade_pred %>% yardstick::spec(truth = bleg, .pred_class, event_level="second")) %>%
+  bind_rows(trade_pred %>% yardstick::precision(truth = bleg, .pred_class, event_level="second")) %>%
+  bind_rows(trade_pred %>% yardstick::npv(truth = bleg, .pred_class, event_level="second")) %>%
+  bind_rows(trade_pred %>% yardstick::f_meas(truth = bleg, .pred_class, event_level="second"))
+
+trade_perf
+
+stab_pred <- 
+  predict(final_fit[[3]], all_test) %>% 
+  bind_cols(predict(final_fit[[3]], all_test, type = "prob")) %>% 
+  bind_cols(all_test %>% select(bleg))%>%
+  # mutate(.pred_class =ifelse(.pred_Yes>0.6, "Yes", "No"))%>%
+  mutate_if(is.character, as.factor)
+
+
+stab_perf<-stab_pred %>% 
+accuracy(truth = bleg, .pred_class) %>%
+  bind_rows(stab_pred%>% roc_auc(truth = bleg, .pred_Yes, event_level="second"))%>%
+  bind_rows(stab_pred%>% pr_auc(truth = bleg, .pred_Yes, event_level="second"))%>%
+  bind_rows(stab_pred%>% sens(truth = bleg, .pred_class, event_level="second")) %>%
+  bind_rows(stab_pred %>% yardstick::spec(truth = bleg, .pred_class, event_level="second")) %>%
+ bind_rows(stab_pred %>% yardstick::precision(truth = bleg, .pred_class, event_level="second")) %>%
+  bind_rows(stab_pred %>% yardstick::npv(truth = bleg, .pred_class, event_level="second")) %>%
+ bind_rows(stab_pred %>% yardstick::f_meas(truth = bleg, .pred_class, event_level="second"))
+
+stab_perf
+
+
+```
+
+```{r}
+# how many downgraded %>%
+best_pred %>% bind_cols(all_test %>% left_join(Seed1119_def %>% select(downgraded, attained_class_comment,crop_id, year)) %>% select(downgraded, attained_class_comment,year)) %>%
+  mutate(downgraded=ifelse(downgraded=="Yes", "Yes", ifelse(attained_class_comment == "Voluntary downgrade - blackleg","Yes","No")))%>%
+  mutate(downgraded = ifelse(is.na(downgraded), "No",downgraded))%>%
+  group_by(.pred_class,year)%>%count(downgraded) %>%
+  filter(downgraded=="Yes")
+
+trade_pred %>% bind_cols(all_test %>% left_join(Seed1119_def %>% select(downgraded, attained_class_comment,crop_id)) %>% select(downgraded, attained_class_comment)) %>%
+  mutate(downgraded=ifelse(downgraded=="Yes", "Yes", ifelse(attained_class_comment == "Voluntary downgrade - blackleg","Yes","No")))%>%
+  mutate(downgraded = ifelse(is.na(downgraded), "No",downgraded))%>%
+  group_by(.pred_class)%>%count(downgraded)
+
+stab_pred %>% bind_cols(all_test %>% left_join(Seed1119_def %>% select(downgraded, attained_class_comment,crop_id)) %>% select(downgraded, attained_class_comment)) %>%
+  mutate(downgraded=ifelse(downgraded=="Yes", "Yes", ifelse(attained_class_comment == "Voluntary downgrade - blackleg","Yes","No")))%>%
+  mutate(downgraded = ifelse(is.na(downgraded), "No",downgraded))%>%
+  group_by(.pred_class)%>%count(downgraded)
+```
+
+
+
+# TEST HIGH LEVEL OF BLACKLEG
+
+```{r}
+# the median is 0 
+# mean_incidence<-Seed1119_def$bleg_max_imp_perc  %>% mean()
+# all_test_high<-all_test %>% left_join(Seed1119_def %>% select(bleg_max_imp_perc, crop_id)) %>%
+#   mutate(bleg = ifelse(bleg_max_imp_perc>=1, "Yes", "No"))%>%
+#   mutate_if(is.character, as.factor) 
+
+
+
+all_test_high<-all_test %>% left_join(Seed1119_def %>% select(bleg_max_imp_perc, crop_id, pre_basic)) %>%
+  mutate(bleg = ifelse(bleg_max_imp_perc<0.25, "No", "Yes"))%>%
+  mutate_if(is.character, as.factor)
+
+all_test_high<-all_test %>% left_join(Seed1119_def %>% select(downgraded, attained_class_comment,crop_id, pre_basic)) %>%
+  #mutate(bleg=downgraded)%>%
+  mutate(bleg = ifelse(downgraded=="Yes", "Yes", ifelse(attained_class_comment == "Voluntary downgrade - blackleg","Yes","No")))%>%
+  mutate(bleg=ifelse(is.na(bleg),"No",bleg))%>%
+  mutate_if(is.character, as.factor)
+
+all_test %>% count(bleg)
+all_test_high%>%count(bleg)
+```
+
+
+```{r}
+
+
+
+
+
+# train set predictions
+best_pred_high <- 
+  predict(final_fit[[1]], all_test_high) %>% 
+  bind_cols(predict(final_fit[[1]], all_test_high, type = "prob")) %>% 
+  bind_cols(all_test_high %>% select(bleg)) %>%
+  #mutate(.pred_class=ifelse(.pred_Yes<0.48,  "No", "Yes"))%>%
+  mutate_if(is.character,as.factor)
+
+best_perf_high<-best_pred_high %>% 
+accuracy(truth = bleg, .pred_class) %>%
+  bind_rows(best_pred_high%>% roc_auc(truth = bleg, .pred_Yes, event_level="second"))%>%
+  bind_rows(best_pred_high%>% pr_auc(truth = bleg, .pred_Yes, event_level="second"))%>%
+  bind_rows(best_pred_high%>% sens(truth = bleg, .pred_class, event_level="second")) %>%
+  bind_rows(best_pred_high %>% yardstick::spec(truth = bleg, .pred_class, event_level="second")) %>%
+ bind_rows(best_pred_high %>% yardstick::precision(truth = bleg, .pred_class, event_level="second")) %>%
+  bind_rows(best_pred_high %>% yardstick::npv(truth = bleg, .pred_class, event_level="second")) %>%
+ bind_rows(best_pred_high %>% yardstick::f_meas(truth = bleg, .pred_class, event_level="second"))
+
+best_perf_high
+
+trade_pred_high <- 
+  predict(final_fit[[2]], all_test_high) %>% 
+  bind_cols(predict(final_fit[[2]], all_test_high, type = "prob")) %>% 
+  bind_cols(all_test_high %>% select(bleg))%>%
+  #mutate(.pred_class=ifelse(.pred_Yes<0.48,  "No", "Yes"))%>%
+  mutate_if(is.character,as.factor)
+
+trade_perf_high<-trade_pred_high %>% 
+accuracy(truth = bleg, .pred_class) %>%
+  bind_rows(trade_pred_high%>% roc_auc(truth = bleg, .pred_Yes, event_level="second"))%>%
+  bind_rows(trade_pred_high%>% pr_auc(truth = bleg, .pred_Yes, event_level="second"))%>%
+  bind_rows(trade_pred_high%>% sens(truth = bleg, .pred_class, event_level="second")) %>%
+  bind_rows(trade_pred_high %>% yardstick::spec(truth = bleg, .pred_class, event_level="second")) %>%
+  bind_rows(trade_pred_high %>% yardstick::precision(truth = bleg, .pred_class, event_level="second")) %>%
+  bind_rows(trade_pred_high %>% yardstick::npv(truth = bleg, .pred_class, event_level="second")) %>%
+  bind_rows(trade_pred_high %>% yardstick::f_meas(truth = bleg, .pred_class, event_level="second"))
+
+trade_perf_high
+
+stab_pred_high <- 
+  predict(final_fit[[3]], all_test_high) %>% 
+  bind_cols(predict(final_fit[[3]], all_test_high, type = "prob")) %>% 
+  bind_cols(all_test_high %>% select(bleg))%>%
+ #mutate(.pred_class=ifelse(.pred_Yes<0.48,  "No", "Yes"))%>%
+  mutate_if(is.character,as.factor)
+
+stab_perf_high<-stab_pred_high %>% 
+accuracy(truth = bleg, .pred_class) %>%
+  bind_rows(stab_pred_high %>% roc_auc(truth = bleg, .pred_Yes, event_level="second"))%>%
+  bind_rows(stab_pred_high %>% pr_auc(truth = bleg, .pred_Yes, event_level="second"))%>%
+  bind_rows(stab_pred_high %>% sens(truth = bleg, .pred_class, event_level="second")) %>%
+  bind_rows(stab_pred_high %>% yardstick::spec(truth = bleg, .pred_class, event_level="second")) %>%
+ bind_rows(stab_pred_high %>% yardstick::precision(truth = bleg, .pred_class, event_level="second")) %>%
+  bind_rows(stab_pred_high %>% yardstick::npv(truth = bleg, .pred_class, event_level="second")) %>%
+ bind_rows(stab_pred_high %>% yardstick::f_meas(truth = bleg, .pred_class, event_level="second"))
+
+stab_perf_high
+
+```
+
+
+
+```{r}
+saveRDS(lasso_fs.matrix.ls2, "boot_coeff_all.rds")
+saveRDS(lasso_fs.matrix.ls, "freq_coeff_all.rds")
+saveRDS(averagep, "averagep_all.rds")
+saveRDS(d_re, "d_re_all.rds")
+saveRDS(stab_pred, "stab_pred_all.rds")
+saveRDS(trade_pred, "trade_pred_all.rds")
+saveRDS(best_pred, "best_pred_all.rds")
+saveRDS(all_test, "all_test.rds")
+```
+
+```{r}
+ gs_lasso_res %>% collect_metrics() %>% filter(.config %in% final_models$.config) %>%
+   mutate(lower = mean-(1.96*std_err),
+          upper = mean+(1.96*std_err)) %>%
+write.csv("tuning_all.csv")
+         
+
+best_perf %>% mutate(model ="max perf")%>%
+  bind_rows(trade_perf %>% mutate(model = "opt"))%>%
+  bind_rows(stab_perf %>% mutate(model = "max stab")) %>%
+  write.csv("test_all.csv")
+
+d_re %>% filter(model %in% final_models$.config) %>% write.csv("stability_all.csv")
+
+```
+
+# plot glmnet
+
+```{r}
+
+
+tidy_coefs<-final_fit[[2]]$fit$fit$fit %>% broom::tidy() %>%  filter(term != "(Intercept)") %>% 
+    select(-step, -dev.ratio)
+delta <- abs(tidy_coefs$lambda -trade_off$lambda)
+lambda_opt <- tidy_coefs$lambda[which.min(delta)]
+
+label_coefs <- tidy_coefs %>% 
+  mutate(abs_estimate = abs(estimate)) %>% 
+  filter(abs_estimate >= 0.01) %>% 
+  distinct(term) %>% 
+  inner_join(tidy_coefs, by = "term") %>% 
+  filter(lambda == lambda_opt)
+tidy_coefs %>% 
+  ggplot(aes(x = lambda, y = estimate, group = term, col = term, label = term)) +
+  geom_vline(xintercept = lambda_opt, lty = 3) +
+  geom_line(alpha = .4) +
+ 
+  theme(legend.position = "none") +
+  scale_x_log10() +
+  ggrepel::geom_text_repel(data = label_coefs)
+
+```
+
+# test 2
+```{r}
+trade_pred2 <- 
+  predict(final_fit[[2]], all_test) %>% 
+  bind_cols(predict(final_fit[[2]], all_test, type = "prob")) %>% 
+  bind_cols(all_test %>% select(bleg))%>%
+  mutate(.pred_class =ifelse(.pred_Yes>0.4, "Yes", "No"))%>%
+  mutate_if(is.character, as.factor)
+
+
+trade_perf2<-trade_pred2 %>% 
+accuracy(truth = bleg, .pred_class) %>%
+  bind_rows(trade_pred%>% roc_auc(truth = bleg, .pred_Yes, event_level="second"))%>%
+  bind_rows(trade_pred%>% pr_auc(truth = bleg, .pred_Yes, event_level="second"))%>%
+  bind_rows(trade_pred%>% sens(truth = bleg, .pred_class, event_level="second")) %>%
+  bind_rows(trade_pred %>% yardstick::spec(truth = bleg, .pred_class, event_level="second")) %>%
+  bind_rows(trade_pred %>% yardstick::precision(truth = bleg, .pred_class, event_level="second")) %>%
+  bind_rows(trade_pred %>% yardstick::npv(truth = bleg, .pred_class, event_level="second")) %>%
+  bind_rows(trade_pred %>% yardstick::f_meas(truth = bleg, .pred_class, event_level="second"))
+
+trade_perf2
+
+stab_pred2 <- 
+  predict(final_fit[[3]], all_test) %>% 
+  bind_cols(predict(final_fit[[3]], all_test, type = "prob")) %>% 
+  bind_cols(all_test %>% select(bleg))%>%
+  mutate(.pred_class =ifelse(.pred_Yes>0.4, "Yes", "No"))%>%
+  mutate_if(is.character, as.factor)
+
+
+stab_perf2<-stab_pred2 %>% 
+accuracy(truth = bleg, .pred_class) %>%
+  bind_rows(stab_pred%>% roc_auc(truth = bleg, .pred_Yes, event_level="second"))%>%
+  bind_rows(stab_pred%>% pr_auc(truth = bleg, .pred_Yes, event_level="second"))%>%
+  bind_rows(stab_pred%>% sens(truth = bleg, .pred_class, event_level="second")) %>%
+  bind_rows(stab_pred %>% yardstick::spec(truth = bleg, .pred_class, event_level="second")) %>%
+ bind_rows(stab_pred %>% yardstick::precision(truth = bleg, .pred_class, event_level="second")) %>%
+  bind_rows(stab_pred %>% yardstick::npv(truth = bleg, .pred_class, event_level="second")) %>%
+ bind_rows(stab_pred %>% yardstick::f_meas(truth = bleg, .pred_class, event_level="second"))
+
+stab_perf2
+```
+
