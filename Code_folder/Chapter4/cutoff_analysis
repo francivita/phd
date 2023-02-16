@@ -139,49 +139,10 @@ method<-list()
 method2<-list()
 for (i in  1:5){
   for(j in 1:11){method[[j]]<-catboost_testing_pred_7[[i]] %>%
-    bind_cols(my_db[Outer_mlr$test.inds[[i]]] %>% select(crop_id))%>%
-    mutate(hard_Yes= ifelse(.pred_Yes>optimal_all2[[i]][[j]] %>% pull(pred_Yes), "Yes", "No"),
+    bind_cols(my_db[Outer_mlr$test.inds[[i]],] %>% 
+                select(crop_id))%>%
+    mutate(hard_Yes= ifelse(.pred_Yes>optimal_all2[[i]][[j]] %>%
+                              pull(pred_Yes), "Yes", "No"),
            Method =paste(optimal.thresholds()[[j]]) ) %>%
     mutate_if(is.character, as.factor)}
     method2[[i]]<-method}
-
-method_metrics<-list()
-method_metrics2<-list()
-for (i in  1:5){
-  for(j in 1:7){method_metrics[[j]]<-method2[[i]][[j]] %>% conf_mat(truth = outcome, hard_Yes) %>% summary(event_level='second') %>% mutate(Method =paste(optimal.thresholds()[[j]]))}
-  method_metrics2[[i]]<-method_metrics}
-
-for (i in  1:5){method_metrics2[[i]][[9]]<-method2[[i]][[9]] %>% conf_mat(truth = outcome, hard_Yes) %>% summary(event_level='second') %>% mutate(Method =paste(optimal.thresholds()[[9]]))}
-
-for (i in  1:5){method_metrics2[[i]][[10]]<-method2[[i]][[10]] %>% conf_mat(truth = outcome, hard_Yes) %>% summary(event_level='second') %>% mutate(Method =paste(optimal.thresholds()[[10]]))}
-
-for (i in  1:5){method_metrics2[[i]][[11]]<-method2[[i]][[11]] %>% conf_mat(truth = outcome, hard_Yes) %>% summary(event_level='second') %>% mutate(Method =paste(optimal.thresholds()[[11]]))}
-
-method_metrics_summary<-list()
-for(i in 1:5){method_metrics_summary[[i]]<-do.call(rbind, method_metrics2[[i]])}
-method_metrics_summary<-data.table::rbindlist(method_metrics_summary, idcol = "Fold") %>%
-  group_by(.metric, Method) %>% 
-  summarise(mean=mean(.estimate), min = min(.estimate), max = max(.estimate), sd = sd(.estimate), n=n())
-
-method_predictions<-list()
-for(i in 1:5){ method_predictions[[i]]<-do.call(rbind, method2[[i]])}
-
-method_predictions<-data.table::rbindlist(method_predictions, idcol="fold")
-
-
-method_metrics_summary%>% filter(.metric =="sens" | .metric=="spec" | .metric == "ppv"| .metric =="npv" | .metric=="accuracy" ) %>%
-  pivot_wider(names_from = Method, values_from = c(mean, min,max,sd,n)) %>%
-  write.csv("method_metric_summary.csv")
-
-
-method_metrics_all<-list()
-for(i in 1:5){method_metrics_all[[i]]<-method_metrics2[[i]]%>%do.call(rbind,.)}
-
-method_metrics_all<-method_metrics_all %>% data.table::rbindlist(idcol="Fold")
-
-
-saveRDS(method_predictions, "method_predictions_7.rds")
-saveRDS(method_metrics_all, "method_metrics_all.rds")
-saveRDS(method_metrics_summary, "method_metrics_summary_7.rds")
-
-saveRDS(optimal_all2, "optimal_all2.rds")
