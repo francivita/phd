@@ -250,8 +250,7 @@ saveRDS( bind_rows(catboost_testing_perf_7, .id="Fold") %>% mutate(seed=123), "c
 saveRDS( bind_rows(catboost_training_perf_7, .id="Fold") %>% mutate(seed=123), "catboost_training_perf_7.rds")
 
 # save this for cutoff analysis
-saveRDS(bind_rows(catboost_testing_pred_7, .id="Fold") %>% mutate(seed=123), 
-        "catboost_testing_pred_7.rds")
+saveRDS(catboost_testing_pred_7,"catboost_testing_pred_7.rds")
 
 # aggregate validation metrics (summarize = T)
 validation_7<-list()
