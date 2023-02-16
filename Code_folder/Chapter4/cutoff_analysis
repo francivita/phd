@@ -1,0 +1,187 @@
+#title: "Cut-off analysis"
+#author: "Francesco Civita"
+#date: "16/02/2023"
+
+
+library(dplyr)
+library(tidymodels)
+library(PresenceAbsence)
+
+
+my_db<-readRDS("my_db.rds")
+Outer_mlr<-readRDS("Outer_mlr.rds")
+Inner_mlr<-readRDS("Inner_mlr.rds")
+prediction_inner_7<-readRDS("predictions_catboost_7.rds")
+
+pred_inner<-list()
+for (i in 1:5){
+  pred_inner[[i]]<-prediction_inner_7[[i]] %>% filter(id=="Fold1") %>% 
+    bind_cols(my_db[Inner_mlr[[i]]$test.inds[[1]],] %>% 
+                select(crop_id, year)) %>%
+    bind_rows(prediction_inner_7[[i]] %>% filter(id=="Fold2") %>% 
+                bind_cols(my_db[Inner_mlr[[i]]$test.inds[[2]],] %>% 
+                            select(crop_id, year)))%>%
+    bind_rows(prediction_inner_7[[i]] %>% filter(id=="Fold3") %>% 
+                bind_cols(my_db[Inner_mlr[[i]]$test.inds[[3]],] %>% 
+                            select(crop_id, year)))}
+
+
+# check a series of threshold
+set.seed(123)
+thresholds <- seq(0.001,1, by = 0.001)
+
+binary_outcome_all<-list()
+for (i in 1:5){
+  binary_outcome_all[[i]]<-pred_inner[[i]]%>% 
+    dplyr::select(crop_id, outcome, pred_Yes=catboost_Yes, pred_No=catboost_No) %>% 
+    mutate(outcome = ifelse(outcome== "Yes", 1 ,0))}
+
+# 11 out of 12 methods were used
+optimal_all<-list()
+optimal_all2<-list()
+for (i in 1:5){
+  for (j in 1:9){optimal_all[[j]]<-
+    optimal.thresholds(binary_outcome_all[[i]], thresholds, opt.methods = j)}
+    optimal_all2[[i]]<-optimal_all}
+
+for(i in 1:5){
+  optimal_all2[[i]][[10]]<-optimal.thresholds(
+    binary_outcome_all[[i]], thresholds, opt.methods = 10, req.sens = 0.75)}
+for(i in 1:5){
+  optimal_all2[[i]][[11]]<-optimal.thresholds(
+    binary_outcome_all[[i]], thresholds, opt.methods = 11, req.spec = 0.85)}
+
+
+optimised_pred_all<-list()
+optimised_pred_all2<-list()
+
+for(i in 1:5){
+  for (j in 1:9) {optimised_pred_all[[j]]<-binary_outcome_all[[i]]%>%
+    mutate(hardYes = ifelse(pred_Yes>optimal_all2[[i]][[j]]$pred_Yes,"Yes","No")) %>%
+    mutate(outcome = ifelse(outcome>0, "Yes", "No"))}
+  optimised_pred_all2[[i]]<-optimised_pred_all}
+
+for(i in 1:5){
+  optimised_pred_all2[[i]][[10]]<-binary_outcome_all[[i]] %>%
+    mutate(hardYes = ifelse(pred_Yes>optimal_all2[[i]][[10]]$pred_Yes,"Yes","No")) %>%
+    mutate(outcome = ifelse(outcome>0, "Yes", "No"))}
+for(i in 1:5){
+  optimised_pred_all2[[i]][[11]]<-binary_outcome_all[[i]] %>%
+    mutate(hardYes = ifelse(pred_Yes>optimal_all2[[i]][[11]]$pred_Yes,"Yes","No")) %>%
+    mutate(outcome = ifelse(outcome>0, "Yes", "No"))}
+
+
+conf_mat_all<-list()
+conf_mat_all2<-list()
+for(i in 1:5){
+  for (j in 1:7) {conf_mat_all[[j]]<-summary(optimised_pred_all2[[i]][[j]]%>%
+                                               mutate_if(is.character, as.factor) %>%
+                                               yardstick::conf_mat(truth = outcome, hardYes),
+                                             event_level = 'second')}
+conf_mat_all2[[i]]<-conf_mat_all}
+
+for(i in 1:5){
+  conf_mat_all2[[i]][[9]]<-summary(optimised_pred_all2[[i]][[9]]%>%
+                                     mutate_if(is.character, as.factor) %>%
+                                     yardstick::conf_mat(truth = outcome, hardYes),
+                                   event_level = 'second')}
+for(i in 1:5){
+  conf_mat_all2[[i]][[10]]<-summary(optimised_pred_all2[[i]][[10]]%>%
+                                      mutate_if(is.character, as.factor) %>%
+                                      yardstick::conf_mat(truth = outcome, hardYes),
+                                    event_level = 'second')}
+for(i in 1:5){
+  conf_mat_all2[[i]][[11]]<-summary(optimised_pred_all2[[i]][[11]]%>%
+                                      mutate_if(is.character, as.factor) %>%
+                                      yardstick::conf_mat(truth = outcome, hardYes),
+                                    event_level = 'second')}
+
+
+conf_mat_all_merged<-list()
+conf_mat_all_merged2<-list()
+for(i in 1:5){
+  for(j in 1:7){
+    conf_mat_all_merged[[j]]<-conf_mat_all2[[i]][[j]] %>% mutate(Method =optimal.thresholds()[j], Fold=i)}
+  conf_mat_all_merged2[[i]]<-conf_mat_all_merged }
+
+for(i in 1:5){
+  for(j in 8:10){
+    conf_mat_all_merged2[[i]][[j+1]]<-conf_mat_all2[[i]][[j+1]] %>% mutate(Method =optimal.thresholds()[[j+1]], Fold =i)}}
+
+for(i in 1:5){
+  conf_mat_all_merged2[[i]] <- do.call(rbind,conf_mat_all_merged2[[i]])}
+
+conf_mat_all_merged2<-do.call(rbind,conf_mat_all_merged2)
+
+
+optimal_all_merged<-list()
+
+for(i in 1:5){
+  optimal_all_merged[[i]] <- do.call(rbind,optimal_all2[[i]]) %>% mutate(Fold=i)}
+
+optimal_all_merged<-do.call(rbind,optimal_all_merged)
+
+
+
+
+conf_mat_all_merged2 %>%
+  left_join( optimal_all_merged %>% mutate(threshold = pred_Yes)%>% select(threshold, Method, Fold) ,by=c("Method", "Fold")) %>%
+  pivot_wider(names_from = .metric, values_from = .estimate) %>% group_by(Method) %>% summarise(across(threshold:f_meas, list(mean=mean, sd=sd))) %>%
+  arrange(desc(threshold_mean))
+
+#test the different cutoff
+
+catboost_testing_pred_7<-readRDS("catboost_testing_pred_7.rds")
+
+
+
+method<-list()
+method2<-list()
+for (i in  1:5){
+  for(j in 1:11){method[[j]]<-catboost_testing_pred_7[[i]] %>%
+    bind_cols(my_db[Outer_mlr$test.inds[[i]]] %>% select(crop_id))%>%
+    mutate(hard_Yes= ifelse(.pred_Yes>optimal_all2[[i]][[j]] %>% pull(pred_Yes), "Yes", "No"),
+           Method =paste(optimal.thresholds()[[j]]) ) %>%
+    mutate_if(is.character, as.factor)}
+    method2[[i]]<-method}
+
+method_metrics<-list()
+method_metrics2<-list()
+for (i in  1:5){
+  for(j in 1:7){method_metrics[[j]]<-method2[[i]][[j]] %>% conf_mat(truth = outcome, hard_Yes) %>% summary(event_level='second') %>% mutate(Method =paste(optimal.thresholds()[[j]]))}
+  method_metrics2[[i]]<-method_metrics}
+
+for (i in  1:5){method_metrics2[[i]][[9]]<-method2[[i]][[9]] %>% conf_mat(truth = outcome, hard_Yes) %>% summary(event_level='second') %>% mutate(Method =paste(optimal.thresholds()[[9]]))}
+
+for (i in  1:5){method_metrics2[[i]][[10]]<-method2[[i]][[10]] %>% conf_mat(truth = outcome, hard_Yes) %>% summary(event_level='second') %>% mutate(Method =paste(optimal.thresholds()[[10]]))}
+
+for (i in  1:5){method_metrics2[[i]][[11]]<-method2[[i]][[11]] %>% conf_mat(truth = outcome, hard_Yes) %>% summary(event_level='second') %>% mutate(Method =paste(optimal.thresholds()[[11]]))}
+
+method_metrics_summary<-list()
+for(i in 1:5){method_metrics_summary[[i]]<-do.call(rbind, method_metrics2[[i]])}
+method_metrics_summary<-data.table::rbindlist(method_metrics_summary, idcol = "Fold") %>%
+  group_by(.metric, Method) %>% 
+  summarise(mean=mean(.estimate), min = min(.estimate), max = max(.estimate), sd = sd(.estimate), n=n())
+
+method_predictions<-list()
+for(i in 1:5){ method_predictions[[i]]<-do.call(rbind, method2[[i]])}
+
+method_predictions<-data.table::rbindlist(method_predictions, idcol="fold")
+
+
+method_metrics_summary%>% filter(.metric =="sens" | .metric=="spec" | .metric == "ppv"| .metric =="npv" | .metric=="accuracy" ) %>%
+  pivot_wider(names_from = Method, values_from = c(mean, min,max,sd,n)) %>%
+  write.csv("method_metric_summary.csv")
+
+
+method_metrics_all<-list()
+for(i in 1:5){method_metrics_all[[i]]<-method_metrics2[[i]]%>%do.call(rbind,.)}
+
+method_metrics_all<-method_metrics_all %>% data.table::rbindlist(idcol="Fold")
+
+
+saveRDS(method_predictions, "method_predictions_7.rds")
+saveRDS(method_metrics_all, "method_metrics_all.rds")
+saveRDS(method_metrics_summary, "method_metrics_summary_7.rds")
+
+saveRDS(optimal_all2, "optimal_all2.rds")
