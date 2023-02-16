@@ -1,0 +1,87 @@
+#title: "Cross-Year NCV indices"
+#author: "Francesco Civita"
+#date: "16/02/2023"
+
+# Load libraries
+
+library(dplyr)
+library(rsample)
+library(mlr3verse)
+library(mlr3spatiotempcv)
+library(future)
+library(future.apply)
+
+
+# Import dataset
+my_db<-readRDS("my_db.rds")
+
+
+#set seed for reproducibility
+
+#Temporal 3x5 NCV indices
+task <- as_task_classif(my_db, target = "outcome",  positive = "Yes")
+# BLOCKING by "year" 
+task$col_roles$group="year"
+# Remove "userID" from features
+task$col_roles$feature = setdiff(task$col_roles$feature, "year")
+# Create inner cv (3 folds)
+resampling_inner = rsmp("cv",folds=3)
+learner = lrn("classif.rpart")
+measure = msr("classif.ce")
+search_space = ps(cp = p_dbl(lower = 0.001, upper = 0.1))
+terminator = trm("evals", n_evals = 5)
+tuner = tnr("grid_search", resolution = 5)
+at = AutoTuner$new(learner, resampling_inner, measure, terminator, tuner, 
+                   search_space)
+# Create outer cv (5 folds)
+resampling_outer = rsmp("cv",folds=5)
+
+#extract indices
+
+plan(multisession, workers = 5)
+set.seed(42, "L'Ecuyer-CMRG") # Important to always get the same indices
+rr = resample(task = task, learner = at, resampling = resampling_outer, 
+              store_models = T, store_backends = T)
+
+
+
+
+# Outer indices
+Outer_mlr<-list()
+for (i in 1:5) Outer_mlr$train.inds[[i]]<-rr$resampling$train_set(i)
+for (i in 1:5) Outer_mlr$test.inds[[i]]<-rr$resampling$test_set(i)
+
+
+# Inner indices
+Inner_mlr<-list()
+train_inds<-list()
+test_inds<-list()
+for(i in 1:5){
+  for(j in 1:3){train_inds[[j]]<-rr$learners[[i]]$tuning_instance$objective$resampling$train_set(j)
+  test_inds[[j]]<-rr$learners[[i]]$tuning_instance$objective$resampling$test_set(j)
+  }
+  Inner_mlr[[i]]<-list(train.inds=train_inds, test.inds=test_inds)
+}
+
+Inner_mlr
+
+# Manual CV
+
+
+indices <- list()
+Out<-list()
+for(i in 1:5){
+  for(j in 1:3){Out[[j]]<-
+    list(analysis = c(Inner_mlr[[i]]$train.inds[[j]]), assessment =c(Inner_mlr[[i]]$test.inds[[j]]))}
+  indices[[i]]<-Out}
+
+
+splits<-list()
+for(j in 1:5){splits[[j]] <- lapply(indices[[j]], make_splits, data = my_db)}
+
+cross_year_ncv<-list()
+for(j in 1:5){cross_year_ncv[[j]] <-manual_rset(splits[[j]], c(paste("Fold", sprintf('%0.1d', 1:3), sep="")))}
+
+saveRDS(cross_year_ncv,"cross_year_ncv.rds")
+saveRDS(Outer_mlr, "Outer_mlr.rds")
+saveRDS(Inner_mlr, "Inner_mlr.rds")
