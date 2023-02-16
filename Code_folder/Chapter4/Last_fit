@@ -1,0 +1,57 @@
+#title: "Finalise CB model"
+#author: "Francesco Civita"
+#date: "16/02/2023"
+
+
+
+library(dplyr)
+library(tidymodels)
+library(catboost)
+library(treesnip)
+set_dependency("boost_tree", eng = "catboost", "catboost")
+set_dependency("boost_tree", eng = "catboost", "treesnip")
+
+
+# Assuming that 7 features is the best subset, finalise the CB model
+metric_catboost_all_7<-readRDS("metric_catboost_all_7.rds")
+metric_catboost_7<-readRDS("metric_catboost_cy_7.rds")
+merge_fi_7<-readRDS("merge_fi_7.rds")
+hp_grid_catboost<-readRDS("hp_grid_catboost.rds")
+my_db<-readRDS("my_db.rds")
+
+
+metric_catboost_all_7%>% 
+  do.call(rbind,.) %>% 
+  filter(.metric=="roc_auc")%>% 
+  group_by(.config)%>% 
+  summarise(mean=mean(.estimate), n=n()) %>%
+  arrange(desc(mean)) %>% slice(1) %>%
+  left_join(metric_catboost_7[[1]]%>% 
+  select(.config, mtry, tree_depth, learn_rate), by=".config") %>% slice(1)
+
+
+final_set_7<- merge_fi_7 %>% 
+  do.call("rbind",.) %>%
+  group_by(rowname)%>%
+  summarise(sum = sum(V1))%>%
+  arrange(desc(sum))%>%
+  slice(1:7) %>%
+  pull(rowname)
+
+#.config = Preprocessor1_Model25 (hp comb n 25)
+
+
+set.seed(123)
+final_catboost_7 <- boost_tree(trees = 150, 
+                               mtry=hp_grid_catboost[25,]$mtry,
+                               tree_depth = hp_grid_catboost[25,]$tree_depth, ,
+                               learn_rate = hp_grid_catboost[25,]$learn_rate,
+                               mode = "classification") %>%
+                               set_engine("catboost") %>%
+                               fit(outcome ~ ., data = my_db %>% 
+                               select(all_of(final_set_7), outcome)) 
+
+saveRDS(final_catboost_7, "final_model_7.rds")
+
+
+
